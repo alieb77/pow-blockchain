@@ -293,5 +293,47 @@ class BlockchainClassTests(unittest.TestCase):
         self.assertEqual(len(chain.blocks), 2)
 
 
+class TransactionIndexTests(unittest.TestCase):
+    """Partie 12 : index transaction -> bloc et adresse -> transactions, pour l'API et l'explorateur."""
+
+    def test_index_follows_add_block(self):
+        blocks = build_blocks()
+        chain = Blockchain()
+        for block in blocks[1:]:
+            chain.add_block(block)
+        payment = blocks[2].transactions[1]  # miner -> alice
+        self.assertEqual(chain.index_of_transaction(payment.hash), 2)
+        self.assertEqual(chain.find_transaction(payment.hash), (blocks[2], payment))
+        self.assertIsNone(chain.index_of_transaction("0" * 64))
+        self.assertIsNone(chain.find_transaction("0" * 64))
+        coinbases = [block.coinbase.hash for block in blocks[1:]]
+        self.assertEqual(
+            chain.transaction_hashes_of(MINER.address),
+            (coinbases[0], coinbases[1], blocks[2].transactions[1].hash, blocks[2].transactions[2].hash, coinbases[2]),
+        )
+        self.assertEqual(chain.transaction_hashes_of(ALICE.address), (payment.hash, blocks[3].transactions[1].hash))
+        self.assertEqual(chain.transaction_hashes_of(CAROL.address), (blocks[3].transactions[1].hash,))
+        self.assertEqual(chain.transaction_hashes_of("0" * 64), ())  # l'adresse réservée de la coinbase n'est pas indexée
+
+    def test_index_is_rebuilt_by_from_blocks(self):
+        blocks = build_blocks()
+        rebuilt = Blockchain.from_blocks(blocks)
+        incremental = Blockchain()
+        for block in blocks[1:]:
+            incremental.add_block(block)
+        for block in blocks[1:]:
+            for transaction in block.transactions:
+                self.assertEqual(rebuilt.find_transaction(transaction.hash), incremental.find_transaction(transaction.hash))
+        for address in (MINER.address, ALICE.address, BOB.address, CAROL.address):
+            self.assertEqual(rebuilt.transaction_hashes_of(address), incremental.transaction_hashes_of(address))
+
+    def test_self_payment_is_indexed_once(self):
+        chain = Blockchain()
+        chain.add_block(mined(create_block(chain.last_block, [], MINER.address, timestamp=T1)))
+        loop = signed_tx(MINER, MINER, coins(1))
+        chain.add_block(mined(create_block(chain.last_block, [loop], MINER.address, timestamp=T2)))
+        self.assertEqual(chain.transaction_hashes_of(MINER.address).count(loop.hash), 1)
+
+
 if __name__ == "__main__":
     unittest.main()

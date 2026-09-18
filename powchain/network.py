@@ -59,6 +59,7 @@ from .errors import MiningLimitError, ProtocolError, StorageError
 from .mining import mine_block
 from .node import Connect, Disconnect, Node, Send
 from .protocol import LOOPBACK, MAX_MESSAGE_BYTES, decode_message, encode_message, format_address, host_scope, parse_address
+from .transaction import Transaction
 
 DEFAULT_MINING_CHUNK = 4096  # essais entre deux retours à la boucle réseau (quelques millisecondes)
 HELLO_TIMEOUT_SECONDS = 10.0  # une connexion qui ne s'est pas présentée au bout de ce délai est fermée
@@ -151,6 +152,13 @@ class NodeServer:
     async def tick_now(self) -> None:
         """Un entretien immédiat (rappel des pairs du carnet), sans attendre la prochaine seconde."""
         await self._run(self.node.tick)
+
+    async def submit_transaction(self, transaction: Transaction) -> None:
+        """Transaction émise localement (API HTTP, wallet) : admise au mempool puis diffusée aux pairs.
+
+        Lève InvalidTransactionError / MempoolError si le nœud la refuse.
+        """
+        await self._run(lambda: self.node.submit_transaction(transaction))
 
     async def _tick_forever(self) -> None:
         while True:

@@ -18,6 +18,13 @@ chaînes concurrentes (P2P) : la plus lourde en travail l'emporte.
 La classe Blockchain maintient l'invariant « tous mes blocs forment une
 chaîne valide » et l'État des comptes qui en découle, mis à jour à chaque
 add_block() réussi. Un bloc refusé ne modifie ni les blocs ni l'état.
+
+Index (Partie 12) : pour répondre vite à « où est cette transaction ? » et
+« quelles transactions concernent cette adresse ? » (API HTTP, explorateur),
+la chaîne tient deux index en mémoire, reconstruits avec elle : hash de
+transaction -> (bloc, position) et adresse -> hashes des transactions où elle
+est expéditeur ou destinataire, dans l'ordre de la chaîne. Ce ne sont que des
+vues : rien de ce qui est hashé ou validé n'en dépend.
 """
 
 from collections.abc import Sequence
@@ -26,6 +33,7 @@ from .block import Block, create_genesis_block, validate_block
 from .errors import InvalidBlockError, InvalidChainError
 from .proof_of_work import block_work
 from .state import State
+from .transaction import Transaction
 
 
 def _replay(blocks: Sequence[Block]) -> State:
@@ -77,6 +85,8 @@ class Blockchain:
         self._blocks: list[Block] = [create_genesis_block()]
         self._state = State()
         self._index_by_hash: dict[str, int] = {self._blocks[0].hash: 0}
+        self._transaction_index: dict[str, tuple[int, int]] = {}  # hash de tx -> (index du bloc, position)
+        self._by_address: dict[str, list[str]] = {}  # adresse -> hashes de tx, dans l'ordre de la chaîne
 
     @classmethod
     def from_blocks(cls, blocks: Sequence[Block]) -> "Blockchain":
@@ -86,6 +96,10 @@ class Blockchain:
         chain._blocks = list(blocks)
         chain._state = state
         chain._index_by_hash = {block.hash: block.index for block in chain._blocks}
+        chain._transaction_index = {}
+        chain._by_address = {}
+        for block in chain._blocks:
+            chain._index_transactions(block)
         return chain
 
     @property
@@ -131,6 +145,33 @@ class Blockchain:
             return ()
         return tuple(self._blocks[from_index : from_index + limit])
 
+    def index_of_transaction(self, transaction_hash: str) -> int | None:
+        """Index du bloc qui contient cette transaction, ou None si la chaîne ne la contient pas."""
+        located = self._transaction_index.get(transaction_hash)
+        return None if located is None else located[0]
+
+    def find_transaction(self, transaction_hash: str) -> tuple[Block, Transaction] | None:
+        """(bloc, transaction) pour ce hash, ou None si la chaîne ne la contient pas."""
+        located = self._transaction_index.get(transaction_hash)
+        if located is None:
+            return None
+        block = self._blocks[located[0]]
+        return block, block.transactions[located[1]]
+
+    def transaction_hashes_of(self, address: str) -> tuple[str, ...]:
+        """Hashes des transactions où address est expéditeur ou destinataire, dans l'ordre de la chaîne."""
+        return tuple(self._by_address.get(address, ()))
+
+    def _index_transactions(self, block: Block) -> None:
+        for position, transaction in enumerate(block.transactions):
+            self._transaction_index[transaction.hash] = (block.index, position)
+            if transaction.is_coinbase or transaction.sender == transaction.recipient:
+                parties = (transaction.recipient,)
+            else:
+                parties = (transaction.sender, transaction.recipient)
+            for address in parties:
+                self._by_address.setdefault(address, []).append(transaction.hash)
+
     @property
     def total_work(self) -> int:
         """Travail cumulé de la chaîne (voir chain_work)."""
@@ -146,6 +187,7 @@ class Blockchain:
         self._blocks.append(block)
         self._state = new_state
         self._index_by_hash[block.hash] = block.index
+        self._index_transactions(block)
 
     def validate(self) -> None:
         """Lève InvalidChainError si la chaîne n'est plus intègre."""

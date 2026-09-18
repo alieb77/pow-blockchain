@@ -24,6 +24,9 @@ temporaire des hôtes fautifs).
 Partie 11 : frais de transaction (champ fee signé, débité avec le montant,
 reversé au mineur par la coinbase ; mempool servi par frais décroissant,
 minimum relayé MIN_RELAY_FEE et éviction des moins payantes : anti-spam).
+Partie 12 : API HTTP (ApiServer : serveur HTTP/1.1 minimal sur asyncio, JSON,
+CORS ; lecture de la chaîne, des comptes, du mempool et des pairs ; soumission
+de transactions signées ; index transaction/adresse dans Blockchain).
 
 Ce module ré-exporte l'API publique pour permettre d'écrire simplement :
 
@@ -83,6 +86,7 @@ from .keys import (
 )
 from .mempool import DEFAULT_MAX_SIZE, Mempool
 from .mining import MiningResult, mine_block
+from .api import API_PORT_OFFSET, API_VERSION, ApiServer
 from .network import DIAL_TIMEOUT_SECONDS, HELLO_TIMEOUT_SECONDS, TICK_INTERVAL_SECONDS, NodeServer, local_ip_addresses
 from .node import (
     BAN_SECONDS,
@@ -161,7 +165,7 @@ from .transaction import (
 )
 from .wallet import DEFAULT_WALLET_PATH, Wallet, WalletEntry
 
-__version__ = "0.10.0"
+__version__ = "0.12.0"
 
 __all__ = [
     "ADDRESS_LENGTH",
@@ -206,6 +210,9 @@ __all__ = [
     "Message",
     "Node",
     "NodeServer",
+    "ApiServer",
+    "API_PORT_OFFSET",
+    "API_VERSION",
     "PROTOCOL_VERSION",
     "Peer",
     "ProtocolError",

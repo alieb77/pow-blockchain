@@ -55,6 +55,7 @@ import time
 from pathlib import Path
 
 from .address import has_valid_checksum, is_valid_address, normalize_address, to_checksummed_address
+from .api import API_PORT_OFFSET, ApiServer
 from .errors import PowChainError, WalletError
 from .keys import KeyPair
 from .money import MIN_RELAY_FEE, format_units, parse_coin_amount
@@ -134,6 +135,11 @@ async def run_node(args: argparse.Namespace) -> None:
         )
     server = NodeServer(node, listen_host(args), args.port, log=timestamped)
     await server.start()
+    api = None
+    if not args.no_api:
+        api_port = args.api_port if args.api_port is not None else args.port + API_PORT_OFFSET
+        api = ApiServer(server, listen_host(args), api_port, log=timestamped)
+        await api.start()
     if args.public:
         reachable = [format_address(ip, server.port) for ip in local_ip_addresses()]
         timestamped(
@@ -180,6 +186,8 @@ async def run_node(args: argparse.Namespace) -> None:
                 )
     finally:
         watcher.cancel()
+        if api is not None:
+            await api.stop()
         await server.stop()
         if server.fatal_error is not None:
             timestamped(f"nœud arrêté : {server.fatal_error}")
@@ -477,6 +485,9 @@ def build_parser() -> argparse.ArgumentParser:
     node.add_argument("--memory", action="store_true", help="ne rien enregistrer sur le disque")
     node.add_argument("--min-fee", default=None, metavar="COIN",
                       help=f"frais minimal pour garder et relayer une transaction (défaut : {format_units(MIN_RELAY_FEE)})")
+    node.add_argument("--api-port", type=int, default=None, metavar="PORT",
+                      help=f"port de l'API HTTP (défaut : port P2P + {API_PORT_OFFSET}) ; même interface que le nœud (--public l'ouvre aussi)")
+    node.add_argument("--no-api", action="store_true", help="ne pas servir l'API HTTP")
 
     commands.add_parser("keygen", help="générer une paire de clés")
 

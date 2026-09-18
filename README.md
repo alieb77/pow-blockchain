@@ -33,13 +33,13 @@ n'utilisent que la bibliothèque standard (`asyncio`, `json`, `ipaddress`).
 pip install -r requirements.txt
 ```
 
-Démonstration complète (Parties 1 à 8 : réseau simulé, vraies sockets, disque, wallet, minage vers wallet) :
+Démonstration complète (Parties 1 à 12 : réseau simulé, vraies sockets, disque, wallet, minage vers wallet, réseau ouvert, résilience, frais, API HTTP) :
 
 ```bash
 python main.py
 ```
 
-Tests (380, environ 8 s ; une quinzaine utilisent de vraies sockets locales) :
+Tests (476, environ 15 s ; une trentaine utilisent de vraies sockets locales) :
 
 ```bash
 python -m unittest -v
@@ -91,6 +91,12 @@ avec `--peers 127.0.0.1:5001` découvrira le premier tout seul.
 
 > `keygen` et `send --seed-hex` existent encore (dépannage) mais exposent la
 > graine privée : préférez le wallet.
+
+Chaque nœud sert aussi une **API HTTP** (Partie 12) sur le port P2P + 1000,
+en JSON : ouvrez <http://127.0.0.1:6000/status>, `/blocks`, `/blocks/1`,
+`/accounts/<adresse>`, `/mempool`, `/peers` dans un navigateur ou avec `curl` ;
+`POST /transactions` accepte une transaction déjà signée. `--api-port` la
+déplace, `--no-api` la coupe, `--public` l'ouvre avec le nœud.
 
 Chaque nœud écrit dans `data/node-<port>/` (changer avec `--data-dir`,
 désactiver avec `--memory`). Arrêtez-le (Ctrl+C, ou même brutalement) et
@@ -157,16 +163,17 @@ pow-blockchain/
 │   ├── mining.py            mine_block : recherche du nonce
 │   ├── state.py             State immuable : soldes, séquences, règles S1-S3
 │   ├── mempool.py           Mempool : file d'attente validée contre l'état projeté (M1-M5), service par frais, éviction, resync
-│   ├── chain.py             Blockchain (blocs + état + index par hash), validate_chain, chain_work
+│   ├── chain.py             Blockchain (blocs + état + index par hash, index transaction/adresse), validate_chain, chain_work
 │   ├── codec.py             Transaction / Block <-> dictionnaires JSON (réseau et disque)
 │   ├── protocol.py          catalogue des messages, enveloppe JSON, une ligne par message ; portée des adresses
 │   ├── node.py              Node : logique P2P PURE (gossip, synchronisation, forks, règle N1, portées, plafond d'entrées, tick : rappels et bans)
 │   ├── network.py           NodeServer : sockets TCP asyncio + minage par tranches ; délai de hello, appels avec délai, tick chaque seconde
+│   ├── api.py               ApiServer : API HTTP JSON (serveur HTTP/1.1 minimal sur asyncio, CORS) : chaîne, comptes, mempool, pairs, POST transaction
 │   ├── simulation.py        SimulatedNetwork / FakeClock : plusieurs nœuds en mémoire (hôte « sim-<id> » chacun), déterministe
 │   ├── storage.py           NodeStorage : dossier de données (blocks.jsonl, mempool.jsonl, peers.json)
 │   ├── wallet.py            Wallet : clés chiffrées dans wallet.json (compose keys.py, n'importe pas cryptography)
-│   └── __main__.py          ligne de commande : node (--public, --mine-label), wallet, status ; keygen/send en legacy
-└── tests/                   463 tests unittest ; helpers.py = clés de test déterministes
+│   └── __main__.py          ligne de commande : node (--public, --mine-label, --min-fee, --api-port, --no-api), wallet, status ; keygen/send en legacy
+└── tests/                   476 tests unittest ; helpers.py = clés de test déterministes
 ```
 
 Chaque module ne dépend que de ceux situés au-dessus de lui dans cette liste.
@@ -198,6 +205,7 @@ qui permet de tester forks, réorganisations et persistance de façon détermini
 | Adresse réseau | `hôte:port` ; un nœud écoute sur `--port` (`127.0.0.1` par défaut, toutes les interfaces avec `--public`), un client éphémère annonce `listen_port: null` |
 | Portée d'un hôte | `loopback` (127.x, `localhost`, `::1`, `0.0.0.0`) < `private` (toute adresse non routable sur Internet : 10/8, 172.16/12, 192.168/16, lien local…) < `public` (le reste, et les noms d'hôte) ; une adresse n'est annoncée qu'à un pair au moins aussi proche que sa portée |
 | Dossier de données | `data/node-<port>/` : `blocks.jsonl` (un bloc par ligne, Genesis compris), `mempool.jsonl`, `peers.json` (`{"version": 1, "addresses": [...]}`) |
+| API HTTP | `http://<hôte>:<port P2P + 1000>/` (`--api-port`, `--no-api`), même interface que le nœud (`--public` l'ouvre) ; JSON, montants en unités, `Access-Control-Allow-Origin: *`, une requête par connexion |
 
 ## Format canonique (ce qui est réellement hashé)
 
@@ -557,6 +565,44 @@ envoyer des messages invalides en boucle (une limite de débit par pair viendra
 avec l'ouverture publique) ; et la priorité aux frais est locale à chaque
 mempool : deux nœuds honnêtes peuvent servir dans un ordre différent.
 
+## API HTTP (Partie 12)
+
+Le protocole pair-à-pair est fait pour des nœuds qui se parlent en continu ;
+un navigateur, un script ou une application veut juste **poser une question et
+lire la réponse**. Chaque nœud sert donc une API HTTP en JSON (`api.py`), sur
+le port P2P + 1000 par défaut, sans aucune dépendance : un serveur HTTP/1.1
+minimal écrit sur les flux asyncio, dans la même boucle que le nœud (pas de
+fil supplémentaire, donc pas de verrou à ajouter au `Node`).
+
+| Route | Réponse |
+|---|---|
+| `GET /status` | hauteur, travail, pointe, difficulté, pairs (entrants/sortants), carnet, bans, mempool et `min_fee`, mineur, blocs minés ici, masse monétaire, `units_per_coin` |
+| `GET /blocks?limit=20&before=H` | résumés (index, hash, horodatage, difficulté, nb de transactions, frais, mineur, récompense) du plus récent au plus ancien ; `next_before` pour la page suivante |
+| `GET /blocks/<index ou hash>` | le bloc complet, transactions comprises, plus `confirmations`, `fees`, `miner` |
+| `GET /transactions/<hash>` | la transaction avec `status` (`confirmed` : bloc, horodatage, confirmations ; `pending` : dans le mempool) |
+| `POST /transactions` | corps = transaction **déjà signée** au format du codec ; `202` avec le solde projeté, ou `400` motivé (`frais insuffisants`, `solde insuffisant`, champ manquant…) |
+| `GET /accounts/<adresse>` | solde et séquence confirmés et projetés, nombre de transactions, en attente ; l'adresse peut être en hex brut ou à somme de contrôle |
+| `GET /accounts/<adresse>/transactions?limit=20&offset=0` | historique (plus récent d'abord) et transactions en attente |
+| `GET /mempool` | transactions en attente, meilleurs payeurs d'abord, total des frais |
+| `GET /peers` | pairs connectés (id, hôte, port, sens, hauteur), carnet, amorces, adresses propres, bans |
+
+Pour que ça marche, `Blockchain` tient deux index en mémoire, reconstruits
+avec la chaîne (donc cohérents après une réorganisation) : hash de transaction
+→ (bloc, position) et adresse → transactions la concernant. Ce sont des vues,
+rien de validé n'en dépend.
+
+Ce que l'API ne fait **jamais** : signer. Elle ne connaît aucune clé ; une
+transaction reçue est traitée exactement comme si un pair l'avait envoyée
+(règles R, S, M puis diffusion). Exposer l'API avec `--public` n'expose aucun
+fonds. `Access-Control-Allow-Origin: *` sur toutes les réponses permet à une
+page web servie d'ailleurs d'interroger un nœud ; sans cookie ni session, une
+page tierce n'a rien à voler.
+
+Limites : pas de HTTPS ni d'authentification (données publiques ; pour
+Internet, un proxy devant ou `--no-api`), pas de limite de débit par client,
+un bug dans une route renvoie `500` et un journal, jamais un nœud arrêté
+(section 14 de `main.py`, `tests/test_api.py`).
+
 ## Règles de validation
 
 **Transaction** (`validate_transaction`, structurelles) :
@@ -638,12 +684,17 @@ fichier tronquée réparée ; corruption ailleurs refusée ; écritures atomique
   coinbase (exactement, sinon bloc invalide) ; mempool servi par frais
   décroissant, minimum relayé configurable, éviction du moins payant quand il
   est plein (section 13 de `main.py`, `tests/test_fees.py`).
+- API HTTP : chaque nœud répond en JSON (statut, blocs, transactions, comptes
+  avec historique, mempool, pairs) et accepte des transactions signées ; index
+  transaction/adresse dans la chaîne ; CORS ouvert ; serveur HTTP minimal sans
+  dépendance (section 14 de `main.py`, `tests/test_api.py`).
 
 ## Ce qui n'est pas encore implémenté, et pourquoi plus tard
 
 | Fonctionnalité | Pourquoi elle attend |
 |---|---|
 | Instantané de l'état | Le chargement rejoue toute la chaîne (O(n)). Un instantané périodique des soldes rendrait le démarrage immédiat, au prix d'un second format à garder cohérent avec les blocs. |
+| HTTPS et authentification de l'API | L'API est en clair et sans compte : elle ne sert que des données publiques et des transactions déjà signées. Pour l'exposer sur Internet, un proxy HTTPS devant (ou `--no-api`) ; une limite de débit par client viendra avec l'ouverture publique. |
 | Estimation des frais, limite de débit par pair | Le seuil de relais est fixe : pas de marché des frais selon la charge. Et les frais ne freinent pas un pair qui envoie des messages *invalides* en boucle (ils sont rejetés sans coût pour lui) : une limite de débit par connexion viendra avec l'ouverture publique. |
 | Bans contournables, éclipse | Le ban est par hôte : un attaquant change d'IP, et des nœuds honnêtes derrière la même box sont bannis avec le fautif. Rappeler ses pairs ne protège pas d'un réseau de complices qui occuperaient toutes nos sorties (attaque par éclipse) : il faudrait diversifier les sources d'adresses et vérifier plusieurs pairs indépendants. |
 | Traversée de NAT | Un nœud derrière une box n'est joignable que si le port est redirigé à la main ; sinon il reste un client sortant. Pas d'UPnP, pas de relais : hors périmètre d'une blockchain pédagogique. |

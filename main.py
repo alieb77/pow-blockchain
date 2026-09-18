@@ -1,4 +1,4 @@
-"""Démonstration des Parties 1 à 11 : hashes, PoW, signatures, soldes, mempool, réseau P2P, disque, wallet, réseau ouvert, résilience, frais.
+"""Démonstration des Parties 1 à 12 : hashes, PoW, signatures, soldes, mempool, réseau P2P, disque, wallet, réseau ouvert, résilience, frais, API HTTP.
 
 Lancer depuis le dossier du projet :
 
@@ -16,7 +16,8 @@ quand un nœud s'ouvre au réseau (portée des adresses, adresse propre, plafond
 d'entrées, délai de hello), la résilience (rappel des pairs perdus, oubli des
 adresses mortes, bannissement des pairs fautifs), et enfin les frais de
 transaction (politique de relais, priorité aux meilleurs payeurs, éviction,
-frais reversés au mineur par la coinbase).
+frais reversés au mineur par la coinbase), et l'API HTTP du nœud (lecture de
+la chaîne et des comptes en JSON, soumission de transactions signées).
 """
 
 import asyncio
@@ -37,6 +38,7 @@ from powchain import (
     MIN_RELAY_FEE,
     RECONNECT_MAX_DELAY,
     TARGET_BLOCK_TIME,
+    ApiServer,
     Block,
     Blockchain,
     Connect,
@@ -71,6 +73,7 @@ from powchain import (
     mine_block,
     normalize_address,
     parse_coin_amount,
+    transaction_to_dict,
     validate_chain,
 )
 from powchain.protocol import NEW_BLOCK, PEERS
@@ -839,6 +842,75 @@ def demo_fees() -> None:
     print("  ne remplacent pas une limite de débit par pair, qui viendra avec l'ouverture publique du réseau.")
 
 
+# ----------------------------------------------------------------------------
+# Partie 12 : API HTTP
+# ----------------------------------------------------------------------------
+
+
+async def http_call(host: str, port: int, method: str, path: str, payload: dict | None = None) -> tuple[int, dict]:
+    """Client HTTP minimal (bibliothèque standard seulement) : statut et corps JSON."""
+    body = b"" if payload is None else json.dumps(payload).encode("utf-8")
+    reader, writer = await asyncio.open_connection(host, port)
+    writer.write(f"{method} {path} HTTP/1.1\r\nHost: {host}\r\nContent-Length: {len(body)}\r\n\r\n".encode("latin-1") + body)
+    await writer.drain()
+    raw = await reader.read()
+    writer.close()
+    head, _, content = raw.partition(b"\r\n\r\n")
+    return int(head.split(b" ")[1]), json.loads(content)
+
+
+async def demo_api(wallets: dict[str, KeyPair], names: dict[str, str]) -> None:
+    print_title("14. API HTTP : le nœud répond aussi en JSON, pour l'explorateur, le wallet web et les scripts")
+    miner, alice, bob = wallets["miner"], wallets["alice"], wallets["bob"]
+    server = NodeServer(Node(node_id="api-demo"), mining_chunk=512)
+    await server.start()
+    api = ApiServer(server, log=lambda text: print(f"    [nœud] {text}"))
+    await api.start()
+    try:
+        node = server.node
+        node.miner_address = miner.address
+        for _ in range(2):
+            node.submit_block(mine_block(node.build_candidate()).block)
+
+        print(f"\n[14a] GET {api.url}status : l'état du nœud en une requête.")
+        status, data = await http_call(api.host, api.port, "GET", "/status")
+        print(f"    {status} -> hauteur {data['height']}, difficulté {data['difficulty']}, {data['peers']} pair(s), "
+              f"mempool {data['mempool']}, masse monétaire {format_units(data['total_supply'])}")
+
+        print("\n[14b] GET /blocks?limit=2 : les blocs, du plus récent au plus ancien.")
+        status, data = await http_call(api.host, api.port, "GET", "/blocks?limit=2")
+        for block in data["blocks"]:
+            print(f"    bloc n°{block['index']} {block['hash'][:16]}... {block['transactions']} transaction(s), "
+                  f"frais {block['fees']} u, mineur {name_of(block['miner'], names)}")
+
+        print("\n[14c] POST /transactions : un paiement signé par le wallet. L'API ne signe jamais rien.")
+        tx = create_signed_transaction(miner, alice.address, parse_coin_amount("2"), sequence=0, fee=FEE)
+        status, data = await http_call(api.host, api.port, "POST", "/transactions", transaction_to_dict(tx))
+        print(f"    miner -> alice 2 COIN : {status}, accepté = {data.get('accepted')}, "
+              f"solde projeté du mineur {format_units(data['projected_balance'])}")
+        broke = create_signed_transaction(bob, alice.address, parse_coin_amount("1"), fee=FEE)
+        status, data = await http_call(api.host, api.port, "POST", "/transactions", transaction_to_dict(broke))
+        print(f"    bob -> alice 1 COIN (bob n'a rien) : {status}, refus motivé : {data['error']}")
+
+        print("\n[14d] GET /accounts/<adresse> puis /transactions/<hash> : avant et après le bloc suivant.")
+        status, data = await http_call(api.host, api.port, "GET", f"/accounts/{alice.address}")
+        print(f"    alice : solde confirmé {format_units(data['balance'])}, projeté {format_units(data['projected_balance'])}, "
+              f"{data['pending']} transaction en attente")
+        node.submit_block(mine_block(node.build_candidate()).block)
+        status, data = await http_call(api.host, api.port, "GET", f"/transactions/{tx.hash}")
+        print(f"    après un bloc : transaction {data['status']}, bloc n°{data['block_index']}, "
+              f"{data['confirmations']} confirmation")
+        status, data = await http_call(api.host, api.port, "GET", f"/accounts/{alice.address}/transactions")
+        print(f"    historique d'alice : {data['total']} transaction(s) confirmée(s), {len(data['pending'])} en attente")
+
+        print("\n  L'API ne détient aucune clé : elle lit la chaîne et relaie des transactions déjà signées ;")
+        print("  l'exposer (--public) n'expose aucun fonds. Pas de HTTPS ni de limite de débit : pour Internet,")
+        print("  un proxy devant, ou --no-api.")
+    finally:
+        await api.stop()
+        await server.stop()
+
+
 def main() -> None:
     wallets, names = demo_keys()
     chain, pool = demo_genesis_and_first_reward(wallets, names)
@@ -853,6 +925,7 @@ def main() -> None:
     demo_open_network()
     demo_resilience()
     demo_fees()
+    asyncio.run(demo_api(wallets, names))
     print()
 
 
