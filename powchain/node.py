@@ -73,13 +73,29 @@ Ce qu'un nœud fait
   ENTRANTES sont plafonnées (max_inbound) indépendamment des SORTANTES que le
   nœud ouvre lui-même (max_peers) : remplir nos entrées ne nous empêche pas
   de choisir nos sorties.
+* Résilience (Partie 10) : le transport appelle tick() environ chaque
+  seconde. Le nœud y entretient ses sorties : tant qu'il a moins de max_peers
+  connexions sortantes, il rappelle les adresses de son carnet (amorces
+  --peers d'abord, puis les plus récemment vues) qui ne sont ni connectées,
+  ni bannies, ni en attente. Un appel raté (on_dial_failed) ou une connexion
+  perdue repousse le prochain essai de 1, 2, 4... secondes (plafond
+  RECONNECT_MAX_DELAY) ; une poignée de main réussie remet le compteur à
+  zéro ; MAX_DIAL_FAILURES échecs d'affilée font oublier l'adresse
+  (AddressForgotten), sauf les amorces. Un pair FAUTIF (message hors
+  protocole ou mal formé, bloc invalide, lot incohérent, Genesis différent)
+  est déconnecté ET son hôte banni BAN_SECONDS : ses connexions sont
+  refusées avant hello et son adresse n'est pas rappelée ; le ban se lève
+  seul au tick. La boucle locale n'est jamais bannie (ce sont nos propres
+  processus) ; les désagréments bénins (doublon, version, connexion à
+  soi-même, plafond d'entrées) ne bannissent pas.
 
 Ce qu'un nœud ne fait pas (limites connues, voir README) : pas
-d'authentification des pairs, pas de score de mauvaise conduite ni de
-bannissement, pas de reconnexion automatique, pas de traversée de NAT (un
-nœud derrière une box n'est joignable que si son port est redirigé), et la
-règle du plus grand travail ne protège que si la majorité de la puissance de
-calcul est honnête.
+d'authentification des pairs (un ban par hôte se contourne en changeant
+d'adresse IP, et frappe tous les nœuds derrière une même box), pas de
+traversée de NAT (un nœud derrière une box n'est joignable que si son port
+est redirigé), pas de protection contre un réseau qui ment d'une seule voix
+(éclipse), et la règle du plus grand travail ne protège que si la majorité de
+la puissance de calcul est honnête.
 """
 
 import secrets
@@ -124,6 +140,12 @@ MAX_INBOUND = 32  # connexions ENTRANTES acceptées en même temps (au-delà : f
 MAX_KNOWN_ADDRESSES = 64  # carnet d'adresses pour la découverte
 MAX_OWN_ADDRESSES = 8  # adresses sous lesquelles le nœud s'est reconnu (hello portant son node_id)
 MAX_SYNC_BLOCKS = 100_000  # blocs accumulés au plus pendant une synchronisation (garde-fou mémoire)
+RECONNECT_BASE_DELAY = 1  # secondes avant de rappeler une adresse après un premier échec
+RECONNECT_MAX_DELAY = 300  # plafond du délai croissant (1, 2, 4... s)
+MAX_DIAL_FAILURES = 12  # échecs d'affilée avant d'oublier une adresse (sauf amorce) : ~25 min d'essais
+DIAL_GRACE_SECONDS = 30  # appel sans nouvelle du transport au bout de ce délai : réputé échoué
+BAN_SECONDS = 600  # durée du bannissement d'un hôte fautif
+MAX_BANS = 256  # hôtes bannis mémorisés au plus
 
 
 @dataclass(frozen=True, slots=True)
@@ -254,6 +276,11 @@ class Node:
         self._syncs: dict[object, SyncState] = {}
         self._known_addresses: dict[str, None] = {}  # dict = ensemble ordonné
         self._own_addresses: dict[str, None] = {}  # adresses sous lesquelles on s'est reconnu
+        self._seeds: set[str] = set()  # amorces (--peers) : rappelées d'abord, jamais oubliées
+        self._dialing: dict[str, int] = {}  # adresse -> instant de l'appel en cours
+        self._failures: dict[str, int] = {}  # adresse -> échecs d'affilée
+        self._retry_at: dict[str, int] = {}  # adresse -> instant du prochain rappel autorisé
+        self._bans: dict[str, int] = {}  # hôte -> instant de fin du bannissement
         self._listeners: list[Callable[[Event], None]] = []
         self._handlers = {
             HELLO: self._on_hello,
@@ -311,6 +338,28 @@ class Node:
         return tuple(self._own_addresses)
 
     @property
+    def seed_addresses(self) -> tuple[str, ...]:
+        """Amorces (--peers) : rappelées en priorité et jamais oubliées."""
+        return tuple(address for address in self._known_addresses if address in self._seeds)
+
+    @property
+    def dialing(self) -> tuple[str, ...]:
+        """Adresses dont l'appel est en cours (Connect émis, transport pas encore revenu)."""
+        return tuple(self._dialing)
+
+    @property
+    def banned_hosts(self) -> tuple[str, ...]:
+        now = self.now()
+        return tuple(host for host, until in self._bans.items() if until > now)
+
+    def is_banned(self, host: str) -> bool:
+        return self._bans.get(host, 0) > self.now()
+
+    def retry_in(self, address: str) -> int:
+        """Secondes avant le prochain rappel possible de `address` (0 si dès maintenant)."""
+        return max(0, self._retry_at.get(address, 0) - self.now())
+
+    @property
     def syncing(self) -> bool:
         return bool(self._syncs)
 
@@ -325,9 +374,15 @@ class Node:
         """Inscrit un auditeur appelé à chaque événement durable (voir Event)."""
         self._listeners.append(listener)
 
-    def remember_addresses(self, addresses) -> None:
-        """Pré-remplit le carnet d'adresses (ex. rechargé depuis le disque), sans événement."""
-        for address in addresses:
+    def remember_addresses(self, addresses, *, seed: bool = False) -> None:
+        """Pré-remplit le carnet (ex. disque, --peers), sans événement ; seed=True : amorces jamais oubliées.
+
+        Lève ProtocolError si une adresse n'est pas de la forme « hôte:port ».
+        """
+        for raw in addresses:
+            address = format_address(*parse_address(raw))
+            if seed:
+                self._seeds.add(address)
             self._remember_address(address, notify=False)
 
     def _emit(self, event: Event) -> None:
@@ -343,6 +398,12 @@ class Node:
         """Nouvelle connexion (entrante ou sortante) : on se présente."""
         if peer_id in self._peers:
             raise ValueError(f"peer_id déjà utilisé : {peer_id!r}")
+        if address is not None:
+            self._dialing.pop(address, None)  # l'appel a abouti, le transport a une connexion
+        if self.is_banned(host):
+            self.stats["banned_refused"] += 1
+            self._log(f"connexion de {host} refusée : hôte banni encore {self._bans[host] - self.now()} s")
+            return [Disconnect(peer_id, f"hôte {host} banni")]
         if not outbound and self.inbound_connections >= self._max_inbound:
             # Plafond d'entrées : fermée avant même de se présenter, pour ne rien coûter de plus.
             self.stats["inbound_refused"] += 1
@@ -354,8 +415,12 @@ class Node:
         return [Send(peer_id, self.hello())]
 
     def on_disconnect(self, peer_id: object) -> list[Action]:
-        self._peers.pop(peer_id, None)
+        """Connexion fermée (par nous ou par le pair) : une sortie perdue sera rappelée après un délai."""
+        peer = self._peers.pop(peer_id, None)
         self._syncs.pop(peer_id, None)
+        if peer is not None and peer.outbound and peer.dialed_address is not None:
+            self._dialing.pop(peer.dialed_address, None)
+            self._record_dial_failure(peer.dialed_address, "connexion perdue" if peer.ready else "connexion refusée")
         return []
 
     def on_message(self, peer_id: object, msg: Message) -> list[Action]:
@@ -370,15 +435,15 @@ class Node:
         try:
             validate_message(msg)
         except ProtocolError as error:
-            return [Disconnect(peer_id, f"message hors protocole : {error}")]
+            return self._punish(peer, f"message hors protocole : {error}")
         if not peer.ready and msg.type != HELLO:
-            return [Disconnect(peer_id, f"« {msg.type} » reçu avant hello")]
+            return self._punish(peer, f"« {msg.type} » reçu avant hello")
         if peer.ready and msg.type == HELLO:
-            return [Disconnect(peer_id, "hello reçu deux fois")]
+            return self._punish(peer, "hello reçu deux fois")
         try:
             return self._handlers[msg.type](peer, msg)
         except (CodecError, ProtocolError) as error:
-            return [Disconnect(peer_id, f"message « {msg.type} » mal formé : {error}")]
+            return self._punish(peer, f"message « {msg.type} » mal formé : {error}")
 
     # ------------------------------------------------------- API locale
 
@@ -424,6 +489,56 @@ class Node:
             return []
         return self._adopt_block(block, origin=None)
 
+    # ------------------------------------------------------- entretien (tick)
+
+    def tick(self) -> list[Action]:
+        """Entretien périodique, appelé environ chaque seconde par le transport.
+
+        Lève les bans expirés, tient pour échoués les appels dont le transport
+        n'a rien dit depuis DIAL_GRACE_SECONDS, puis rappelle des adresses du
+        carnet tant qu'il manque des connexions sortantes (max_peers).
+        """
+        now = self.now()
+        for host, until in list(self._bans.items()):
+            if now >= until:
+                del self._bans[host]
+                self._log(f"ban de {host} levé")
+        for address, started in list(self._dialing.items()):
+            if now - started >= DIAL_GRACE_SECONDS:
+                del self._dialing[address]
+                self._record_dial_failure(address, "sans nouvelle du transport")
+        actions: list[Action] = []
+        if not self._has_free_outbound_slot():
+            return actions
+        connected = {peer.address for peer in self._peers.values() if peer.address is not None}
+        for address in self._dial_candidates():
+            if not self._has_free_outbound_slot():
+                break
+            if address in connected or address in self._dialing or address in self._own_addresses:
+                continue
+            if self._retry_at.get(address, 0) > now or self.is_banned(parse_address(address)[0]):
+                continue
+            actions.append(self._dial(address))
+        return actions
+
+    def on_dial_failed(self, address: str) -> list[Action]:
+        """Le transport n'a pas pu joindre `address` : prochain essai plus tard, ou adresse oubliée."""
+        self._dialing.pop(address, None)
+        self._record_dial_failure(address, "injoignable")
+        return []
+
+    def on_dial_skipped(self, address: str) -> list[Action]:
+        """Le transport n'a pas appelé (déjà connecté, appel déjà en cours) : créneau libéré, sans échec."""
+        self._dialing.pop(address, None)
+        return []
+
+    def punish(self, peer_id: object, reason: str) -> list[Action]:
+        """Faute constatée par le transport (ligne illisible, message trop long) : déconnexion et ban."""
+        peer = self._peers.get(peer_id)
+        if peer is None:
+            return []
+        return self._punish(peer, reason)
+
     # ------------------------------------------------------- gestionnaires
 
     def _ignore(self, peer: Peer, msg: Message) -> list[Action]:
@@ -434,7 +549,7 @@ class Node:
             return [Disconnect(peer.peer_id, f"version de protocole {msg['version']} non prise en charge")]
         listen_port = msg["listen_port"]
         if listen_port is not None and not 1 <= listen_port <= 65535:
-            return [Disconnect(peer.peer_id, f"port d'écoute invalide : {listen_port}")]
+            return self._punish(peer, f"port d'écoute invalide : {listen_port}")
         if msg["node_id"] == self.node_id:
             # C'est nous à l'autre bout : l'adresse par laquelle on s'est joint est donc la nôtre.
             own = peer.dialed_address
@@ -448,6 +563,10 @@ class Node:
         peer.node_id = msg["node_id"]
         peer.listen_port = listen_port
         peer.height, peer.work, peer.tip_hash = msg["height"], msg["work"], msg["tip_hash"]
+        if peer.dialed_address is not None:
+            # Poignée de main réussie : cette adresse marche, son passif d'échecs est effacé.
+            self._failures.pop(peer.dialed_address, None)
+            self._retry_at.pop(peer.dialed_address, None)
         if peer.address is not None:
             self._remember_address(peer.address)
         self._log(f"pair {peer.node_id[:8]} connecté ({'sortant' if peer.outbound else 'entrant'}) : hauteur {peer.height}, travail {peer.work}")
@@ -476,8 +595,8 @@ class Node:
             if address in self._known_addresses or self._is_own_address(host, port):
                 continue
             self._remember_address(address)
-            if self.outbound_connections + len(actions) < self._max_peers:
-                actions.append(Connect(address))
+            if self._has_free_outbound_slot() and not self.is_banned(host):
+                actions.append(self._dial(address))
         return actions
 
     def _on_new_transaction(self, peer: Peer, msg: Message) -> list[Action]:
@@ -522,13 +641,13 @@ class Node:
         for block in blocks:
             if block.index != expected_index or (expected_prev is not None and block.prev_hash != expected_prev):
                 del self._syncs[peer.peer_id]
-                return [Disconnect(peer.peer_id, f"lot de blocs incohérent (attendu bloc n°{expected_index})")]
+                return self._punish(peer, f"lot de blocs incohérent (attendu bloc n°{expected_index})")
             expected_index, expected_prev = block.index + 1, block.hash
         if not sync.received and not self._grafts_on_our_chain(blocks[0]):
             # Le point de divergence est plus ancien : on redemande plus bas, en reculant de plus en plus.
             if sync.from_index <= 1:
                 del self._syncs[peer.peer_id]
-                return [Disconnect(peer.peer_id, "aucun ancêtre commun : Genesis différent")]
+                return self._punish(peer, "aucun ancêtre commun : Genesis différent")
             sync.from_index = max(1, sync.from_index - sync.step)
             sync.step *= 2
             return [Send(peer.peer_id, message(GET_BLOCKS, from_index=sync.from_index))]
@@ -578,7 +697,7 @@ class Node:
             self.stats["blocks_rejected"] += 1
             if origin is None:
                 raise
-            return [Disconnect(origin, f"bloc invalide : {error}")]
+            return self.punish(origin, f"bloc invalide : {error}")
         self.mempool.remove_confirmed(block, self.chain.state)
         self.stats["blocks_accepted"] += 1
         self._emit(BlockAdded(block))
@@ -628,7 +747,7 @@ class Node:
                     self.chain.add_block(block)
                 except InvalidBlockError as error:
                     self.stats["blocks_rejected"] += 1
-                    return [Disconnect(peer.peer_id, f"bloc n°{block.index} invalide : {error}")]
+                    return self._punish(peer, f"bloc n°{block.index} invalide : {error}")
                 self.mempool.remove_confirmed(block, self.chain.state)
                 self.stats["blocks_accepted"] += 1
                 self._emit(BlockAdded(block))
@@ -639,7 +758,7 @@ class Node:
                 new_chain = Blockchain.from_blocks(candidate)
             except InvalidChainError as error:
                 self.stats["blocks_rejected"] += 1
-                return [Disconnect(peer.peer_id, f"branche invalide : {error}")]
+                return self._punish(peer, f"branche invalide : {error}")
             abandoned = ours[first.index :]
             self.chain = new_chain
             returned = tuple(tx for block in abandoned for tx in block.transactions if not tx.is_coinbase)
@@ -669,9 +788,22 @@ class Node:
         self._known_addresses.pop(address, None)
         self._known_addresses[address] = None
         while len(self._known_addresses) > MAX_KNOWN_ADDRESSES:
-            del self._known_addresses[next(iter(self._known_addresses))]
+            oldest = next((a for a in self._known_addresses if a not in self._seeds), None)
+            if oldest is None:
+                break  # rien que des amorces : on les garde toutes
+            del self._known_addresses[oldest]
+            self._failures.pop(oldest, None)
+            self._retry_at.pop(oldest, None)
         if is_new and notify:
             self._emit(AddressLearned(address))
+
+    def _forget_address(self, address: str) -> None:
+        """Retire une adresse du carnet, avec son passif d'appels, en prévenant les auditeurs."""
+        self._failures.pop(address, None)
+        self._retry_at.pop(address, None)
+        if address in self._known_addresses:
+            del self._known_addresses[address]
+            self._emit(AddressForgotten(address))
 
     def _learn_own_address(self, address: str) -> None:
         """Un hello portait notre node_id : `address` est l'une de nos adresses, plus jamais à rappeler."""
@@ -680,9 +812,49 @@ class Node:
             while len(self._own_addresses) > MAX_OWN_ADDRESSES:
                 del self._own_addresses[next(iter(self._own_addresses))]
             self._log(f"adresse propre apprise : {address} (un pair nous a renvoyés vers nous-mêmes)")
-        if address in self._known_addresses:
-            del self._known_addresses[address]
-            self._emit(AddressForgotten(address))
+        self._forget_address(address)
+
+    def _dial_candidates(self) -> list[str]:
+        """Amorces d'abord (dans l'ordre donné), puis le reste du carnet, plus récemment vu en premier."""
+        seeds = [address for address in self._known_addresses if address in self._seeds]
+        others = [address for address in reversed(self._known_addresses) if address not in self._seeds]
+        return seeds + others
+
+    def _has_free_outbound_slot(self) -> bool:
+        return self.outbound_connections + len(self._dialing) < self._max_peers
+
+    def _dial(self, address: str) -> Connect:
+        self._dialing[address] = self.now()
+        self.stats["dials"] += 1
+        return Connect(address)
+
+    def _record_dial_failure(self, address: str, why: str) -> None:
+        """Un appel n'a pas abouti (ou la connexion est tombée) : délai croissant, puis oubli."""
+        if address not in self._known_addresses:
+            return  # adresse hors carnet (appel manuel) : rien à planifier ni à oublier
+        failures = self._failures.get(address, 0) + 1
+        self._failures[address] = failures
+        self.stats["dial_failures"] += 1
+        if failures >= MAX_DIAL_FAILURES and address not in self._seeds:
+            self._forget_address(address)
+            self._log(f"{address} {why} : {failures} échecs d'affilée, adresse oubliée")
+            return
+        delay = min(RECONNECT_BASE_DELAY * 2 ** (failures - 1), RECONNECT_MAX_DELAY)
+        self._retry_at[address] = self.now() + delay
+        self._log(f"{address} {why} (échec n°{failures}) : nouvel essai dans {delay} s")
+
+    def _punish(self, peer: Peer, reason: str) -> list[Action]:
+        """Pair fautif : déconnexion, et bannissement de son hôte (sauf boucle locale : nos propres processus)."""
+        self.stats["punished"] += 1
+        if host_scope(peer.host) == LOOPBACK:
+            self._log(f"pair {self._name(peer.peer_id)} fautif (boucle locale : pas de ban) : {reason}")
+        else:
+            self._bans[peer.host] = self.now() + BAN_SECONDS
+            self.stats["bans"] += 1
+            while len(self._bans) > MAX_BANS:
+                del self._bans[min(self._bans, key=self._bans.get)]  # le ban qui expire le plus tôt
+            self._log(f"pair {self._name(peer.peer_id)} ({peer.host}) banni {BAN_SECONDS} s : {reason}")
+        return [Disconnect(peer.peer_id, reason)]
 
     def _is_own_address(self, host: str, port: int) -> bool:
         if format_address(host, port) in self._own_addresses:

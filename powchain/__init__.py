@@ -18,6 +18,9 @@ une clé du wallet en adresse publique, sans mot de passe ni graine).
 Partie 9 : ouverture au réseau (CLI « node --public » : écoute sur toutes les
 interfaces ; portée des adresses, adresse propre apprise, plafond de
 connexions entrantes, délai de hello).
+Partie 10 : résilience (Node.tick : rappel des pairs avec délai croissant,
+amorces --peers jamais oubliées, oubli des adresses mortes, bannissement
+temporaire des hôtes fautifs).
 
 Ce module ré-exporte l'API publique pour permettre d'écrire simplement :
 
@@ -77,11 +80,16 @@ from .keys import (
 )
 from .mempool import DEFAULT_MAX_SIZE, Mempool
 from .mining import MiningResult, mine_block
-from .network import HELLO_TIMEOUT_SECONDS, NodeServer, local_ip_addresses
+from .network import DIAL_TIMEOUT_SECONDS, HELLO_TIMEOUT_SECONDS, TICK_INTERVAL_SECONDS, NodeServer, local_ip_addresses
 from .node import (
+    BAN_SECONDS,
+    DIAL_GRACE_SECONDS,
+    MAX_DIAL_FAILURES,
     MAX_FUTURE_DRIFT_SECONDS,
     MAX_INBOUND,
     MAX_PEERS,
+    RECONNECT_BASE_DELAY,
+    RECONNECT_MAX_DELAY,
     AddressForgotten,
     AddressLearned,
     BlockAdded,
@@ -149,7 +157,7 @@ from .transaction import (
 )
 from .wallet import DEFAULT_WALLET_PATH, Wallet, WalletEntry
 
-__version__ = "0.9.0"
+__version__ = "0.10.0"
 
 __all__ = [
     "ADDRESS_LENGTH",
@@ -176,14 +184,21 @@ __all__ = [
     "Connect",
     "CodecError",
     "Disconnect",
+    "BAN_SECONDS",
+    "DIAL_GRACE_SECONDS",
+    "DIAL_TIMEOUT_SECONDS",
     "FakeClock",
     "HELLO_TIMEOUT_SECONDS",
     "LOOPBACK",
+    "MAX_DIAL_FAILURES",
     "MAX_FUTURE_DRIFT_SECONDS",
     "MAX_INBOUND",
     "MAX_PEERS",
     "PRIVATE",
     "PUBLIC",
+    "RECONNECT_BASE_DELAY",
+    "RECONNECT_MAX_DELAY",
+    "TICK_INTERVAL_SECONDS",
     "Message",
     "Node",
     "NodeServer",

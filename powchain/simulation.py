@@ -15,9 +15,13 @@ une démo lisible. Chaque message traverse tout de même l'encodage JSON
     net.mine("A")                  # A mine sur sa pointe, le bloc se propage
     net.partition("A", "B")        # les messages entre A et B sont perdus
     net.heal("A", "B")             # ... puis passent de nouveau
+    net.tick("A")                  # entretien : A rappelle ses pairs perdus (Partie 10)
 
-Les nœuds sont désignés par leur node_id ; leur « adresse » réseau est
-« sim:<node_id> », avec un port fictif unique pour la découverte.
+Les nœuds sont désignés par leur node_id ; chacun a son propre hôte fictif
+« sim-<node_id> » (comme une adresse IP à lui) et un port fictif unique :
+son adresse est « sim-<node_id>:<port> ». Un Connect vers un nœud absent,
+partitionné ou soi-même échoue et le nœud appelant en est averti
+(on_dial_failed), comme avec de vraies sockets.
 """
 
 from collections import deque
@@ -29,7 +33,7 @@ from .mining import mine_block
 from .node import Action, Connect, Disconnect, Node, Send
 from .protocol import decode_message, encode_message, format_address, parse_address
 
-SIM_HOST = "sim"
+SIM_HOST_PREFIX = "sim-"  # hôte fictif d'un nœud simulé : « sim-<node_id> »
 
 
 class FakeClock:
@@ -84,17 +88,21 @@ class SimulatedNetwork:
     def node(self, name: str) -> Node:
         return self._nodes[name]
 
+    def host_of(self, name: str) -> str:
+        return SIM_HOST_PREFIX + name
+
     def address_of(self, name: str) -> str:
-        return format_address(SIM_HOST, self._ports[name])
+        return format_address(self.host_of(name), self._ports[name])
 
     def _name_of(self, address: str) -> str | None:
         try:
             host, port = parse_address(address)
         except ProtocolError:
             return None
-        if host != SIM_HOST:
+        if not host.startswith(SIM_HOST_PREFIX):
             return None
-        return next((name for name, p in self._ports.items() if p == port), None)
+        name = host[len(SIM_HOST_PREFIX) :]
+        return name if self._ports.get(name) == port else None
 
     def peer_id(self, name: str, other: str) -> int | None:
         """Identifiant sous lequel `name` connaît `other`, ou None s'ils ne sont pas connectés."""
@@ -115,8 +123,8 @@ class SimulatedNetwork:
         a_id, b_id = self._new_peer_id(a), self._new_peer_id(b)
         self._links[(a, a_id)] = (b, b_id)
         self._links[(b, b_id)] = (a, a_id)
-        self._enqueue(a, self._nodes[a].on_connect(a_id, SIM_HOST, True, self.address_of(b)))
-        self._enqueue(b, self._nodes[b].on_connect(b_id, SIM_HOST, False))
+        self._enqueue(a, self._nodes[a].on_connect(a_id, self.host_of(b), True, self.address_of(b)))
+        self._enqueue(b, self._nodes[b].on_connect(b_id, self.host_of(a), False))
         if deliver:
             self.deliver()
 
@@ -144,6 +152,14 @@ class SimulatedNetwork:
         """Exécute des actions produites hors message (submit_transaction, submit_block...)."""
         self._enqueue(name, actions)
         self.deliver()
+
+    def tick(self, name: str) -> None:
+        """Un tour d'entretien du nœud (rappel des pairs, bans levés), puis livraison de ce qui en découle."""
+        self.run(name, self._nodes[name].tick())
+
+    def tick_all(self) -> None:
+        for name in list(self._nodes):
+            self.tick(name)
 
     def mine(self, name: str, coinbase_data: str = "") -> Block:
         """Le nœud mine un bloc sur sa pointe, l'adopte et le diffuse ; retourne le bloc."""
@@ -190,9 +206,13 @@ class SimulatedNetwork:
             return 1
         if isinstance(action, Connect):
             target = self._name_of(action.address)
-            if target is not None and target != name and not self.connected(name, target):
-                if frozenset((name, target)) not in self._partitions:
-                    self.connect(name, target, deliver=False)
+            node = self._nodes[name]
+            if target is None or target == name or frozenset((name, target)) in self._partitions:
+                self._enqueue(name, node.on_dial_failed(action.address))  # personne au bout du fil
+            elif self.connected(name, target):
+                self._enqueue(name, node.on_dial_skipped(action.address))
+            else:
+                self.connect(name, target, deliver=False)
             return 0
         if isinstance(action, Disconnect):
             link = self._links.get((name, action.peer_id))

@@ -1,4 +1,4 @@
-"""Démonstration des Parties 1 à 9 : hashes, PoW, signatures, soldes, mempool, réseau P2P, disque, wallet, ouverture au réseau.
+"""Démonstration des Parties 1 à 10 : hashes, PoW, signatures, soldes, mempool, réseau P2P, disque, wallet, réseau ouvert, résilience.
 
 Lancer depuis le dossier du projet :
 
@@ -11,9 +11,10 @@ vivre plusieurs nœuds : d'abord sur un réseau simulé et déterministe (forks,
 règle du plus grand travail, borne d'horloge, attaque majoritaire), puis sur
 de vraies sockets TCP locales, montre ce qu'un nœud écrit sur le disque et ce
 qu'il refuse d'y relire, un wallet qui chiffre ses clés et met une somme de
-contrôle sur les adresses, le minage vers une clé du wallet, et enfin ce qui
-change quand un nœud s'ouvre au réseau (portée des adresses, adresse propre,
-plafond d'entrées, délai de hello).
+contrôle sur les adresses, le minage vers une clé du wallet, ce qui change
+quand un nœud s'ouvre au réseau (portée des adresses, adresse propre, plafond
+d'entrées, délai de hello), et enfin la résilience (rappel des pairs perdus,
+oubli des adresses mortes, bannissement des pairs fautifs).
 """
 
 import asyncio
@@ -25,10 +26,13 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from powchain import (
+    BAN_SECONDS,
     GENESIS_TIMESTAMP,
     HALVING_INTERVAL,
+    MAX_DIAL_FAILURES,
     MAX_FUTURE_DRIFT_SECONDS,
     MAX_PEERS,
+    RECONNECT_MAX_DELAY,
     TARGET_BLOCK_TIME,
     Block,
     Blockchain,
@@ -39,6 +43,7 @@ from powchain import (
     KeyPair,
     Mempool,
     MempoolError,
+    Message,
     Node,
     NodeServer,
     NodeStorage,
@@ -358,10 +363,11 @@ def demo_simulated_network(wallets: dict[str, KeyPair], names: dict[str, str]) -
     greedy = replace(template.coinbase, amount=template.coinbase.amount + parse_coin_amount("1"))
     greedy = replace(greedy, hash=greedy.calculate_hash())
     greedy_block = mine_block(replace(template, transactions=(greedy,))).block
-    b.on_connect(97, "sim", False)
+    b.on_connect(97, "10.66.6.6", False)
     b.on_message(97, Node(node_id="G", clock=clock).hello())
     (action,) = b.on_message(97, message(NEW_BLOCK, block=block_to_dict(greedy_block)))
-    print(f"    {type(action).__name__} : {action.reason}")
+    b.on_disconnect(97)
+    print(f"    {type(action).__name__} : {action.reason} ; son hôte 10.66.6.6 est banni (Partie 10) : {b.is_banned('10.66.6.6')}")
 
     print("\n[6g] Limite honnête : l'attaque majoritaire. mallory dispose de plus de puissance de calcul :")
     print("     pendant que le réseau produit 1 bloc, elle en produit 3 en privé, à partir d'AVANT le paiement à bob.")
@@ -699,6 +705,73 @@ async def demo_hello_timeout() -> None:
     print("                   python -m powchain node --port 5000 --peers <adresse affichée>:5000")
 
 
+# ----------------------------------------------------------------------------
+# Partie 10 : résilience
+# ----------------------------------------------------------------------------
+
+
+def demo_resilience() -> None:
+    print_title("12. Résilience : rappel des pairs perdus, oubli des adresses mortes, bannissement des fautifs")
+    clock = FakeClock(GENESIS_TIMESTAMP + TARGET_BLOCK_TIME)
+    net = SimulatedNetwork(clock)
+    a = net.add(Node(node_id="A", clock=clock, log=lambda t: print(f"    [A] {t}")))
+    net.add(Node(node_id="B", clock=clock))
+    net.connect("A", "B")
+    b_address = net.address_of("B")
+
+    print("\n[12a] A est connecté à B. B s'éteint. À chaque tick (une fois par seconde chez le vrai nœud), A vérifie")
+    print("     ses sorties et rappelle B avec un délai qui double à chaque échec (1, 2, 4... s, plafond 5 min).")
+    net.disconnect("A", "B")
+    net.partition("A", "B")
+    print(f"    connexion perdue ; prochain rappel dans {a.retry_in(b_address)} s")
+    for _ in range(3):
+        clock.advance(a.retry_in(b_address))
+        net.tick("A")
+    print(f"    trois rappels ratés ; A patiente maintenant {a.retry_in(b_address)} s ; pairs de A : {len(a.peers)}")
+
+    print("\n[12b] B revient. Au rappel suivant, la poignée de main réussit et le compteur d'échecs repart de zéro.")
+    net.heal("A", "B")
+    clock.advance(a.retry_in(b_address))
+    net.tick("A")
+    print(f"    A et B reconnectés : {net.connected('A', 'B')} ; délai avant rappel : {a.retry_in(b_address)} s")
+
+    print(f"\n[12c] Une adresse morte (personne n'y répond) est oubliée après {MAX_DIAL_FAILURES} échecs d'affilée, soit")
+    print("     environ 25 minutes d'essais ; une AMORCE (--peers) ne l'est jamais : c'est le point d'entrée de confiance.")
+    d = net.add(Node(node_id="D", clock=clock))
+    d.remember_addresses(["sim-Z:10099"])
+    d.remember_addresses(["sim-S:10098"], seed=True)
+    for _ in range(MAX_DIAL_FAILURES):
+        net.tick("D")
+        clock.advance(RECONNECT_MAX_DELAY)
+    print(f"    après {d.stats['dial_failures']} échecs : adresse morte encore connue ? {'sim-Z:10099' in d.known_addresses} ; "
+          f"amorce encore connue ? {'sim-S:10098' in d.known_addresses}")
+
+    print(f"\n[12d] Pair fautif. Un pair envoie n'importe quoi : déconnecté ET son hôte banni {BAN_SECONDS // 60} min.")
+    print("     Ses connexions sont refusées avant même le hello ; le ban se lève seul. La boucle locale (127.0.0.1)")
+    print("     n'est jamais bannie : ce sont nos propres processus (tests, démos, wallet).")
+    guard = Node(node_id="G", clock=clock, log=lambda t: print(f"    [G] {t}"))
+    guard.on_connect(1, "203.0.113.9", False)
+    guard.on_message(1, Node(node_id="vandale").hello())
+    (action,) = guard.on_message(1, Message("dance", {}))
+    guard.on_disconnect(1)
+    print(f"    -> {action.reason} ; hôtes bannis : {list(guard.banned_hosts)}")
+    (refused,) = guard.on_connect(2, "203.0.113.9", False)
+    print(f"    il revient : « {refused.reason} »")
+    clock.advance(BAN_SECONDS)
+    guard.tick()
+    (welcome,) = guard.on_connect(3, "203.0.113.9", False)
+    print(f"    {BAN_SECONDS // 60} min plus tard : on lui envoie {welcome.message.type} (accepté de nouveau)")
+    guard.on_connect(4, "127.0.0.1", False)
+    (local,) = guard.on_message(4, Message("dance", {}))
+    print(f"    même faute depuis 127.0.0.1 : déconnecté ({local.reason[:24]}...), banni ? {guard.is_banned('127.0.0.1')}")
+
+    print("\n[12e] Limite honnête. (1) Le ban est par hôte : plusieurs nœuds derrière une même box partagent une IP")
+    print("     et sont bannis ensemble ; à l'inverse, un attaquant change d'IP à volonté, le ban protège des bugs et")
+    print("     des maladroits, pas d'un adversaire déterminé. (2) Rappeler ses pairs ne protège pas d'un réseau qui")
+    print("     ment d'une seule voix (éclipse) : si toutes nos sorties tombent chez des complices, on ne voit que leur")
+    print("     chaîne. La parade reste des amorces --peers de confiance et, à terme, plusieurs sources indépendantes.")
+
+
 def main() -> None:
     wallets, names = demo_keys()
     chain, pool = demo_genesis_and_first_reward(wallets, names)
@@ -711,6 +784,7 @@ def main() -> None:
     demo_wallet(wallets)
     demo_mine_to_wallet()
     demo_open_network()
+    demo_resilience()
     print()
 
 

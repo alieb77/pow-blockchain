@@ -130,7 +130,7 @@ class HandshakeTests(unittest.TestCase):
     def test_malformed_message_disconnects(self):
         self.node.on_connect(1, "h", False)
         only_disconnect(self.node.on_message(1, Message("dance", {})), "hors protocole")
-        self.node.on_connect(2, "h", False)
+        self.node.on_connect(2, "h2", False)  # « h » vient d'être banni (Partie 10) : un autre hôte
         self.node.on_message(2, self.other.hello())
         only_disconnect(self.node.on_message(2, message(NEW_BLOCK, block={"index": 1})), "mal formé")
 

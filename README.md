@@ -1,4 +1,4 @@
-# powchain — Parties 1 à 9 : hashes, preuve de travail, signatures, soldes, mempool, réseau P2P, disque, wallet, minage vers wallet, ouverture au réseau
+# powchain — Parties 1 à 10 : hashes, preuve de travail, signatures, soldes, mempool, réseau P2P, disque, wallet, minage vers wallet, ouverture au réseau, résilience
 
 Blockchain Proof of Work construite pas à pas en Python (3.10 ou plus récent).
 Une seule dépendance externe, `cryptography`, pour les signatures Ed25519 **et**
@@ -18,8 +18,10 @@ n'utilisent que la bibliothèque standard (`asyncio`, `json`, `ipaddress`).
 > nœud s'ouvre au réseau local ou à Internet (`node --public`) : il n'annonce à
 > chaque pair que les adresses qui ont un sens pour lui, apprend sa propre
 > adresse, plafonne ses connexions entrantes et ferme les connexions muettes.
-> Les frais, la résilience (reconnexion, bannissement) et les packs de jeu
-> viendront ensuite.
+> Depuis la Partie 10, un nœud tient tout seul dans la durée : il rappelle
+> ses pairs perdus avec un délai croissant, garde ses amorces `--peers` pour
+> toujours, oublie les adresses mortes et bannit dix minutes l'hôte d'un pair
+> fautif. Les frais et les packs de jeu viendront ensuite.
 
 ## Installer et lancer
 
@@ -90,6 +92,9 @@ Chaque nœud écrit dans `data/node-<port>/` (changer avec `--data-dir`,
 désactiver avec `--memory`). Arrêtez-le (Ctrl+C, ou même brutalement) et
 relancez-le **sans** `--peers` : il recharge sa chaîne, revalide tout, reprend
 ses transactions en attente et se reconnecte aux adresses qu'il connaissait.
+Éteignez un pair : le nœud le rappelle tout seul (1, 2, 4… s, jusqu'à 5 min
+d'attente) et le retrouve dès qu'il revient ; les adresses de `--peers` sont
+rappelées en priorité et jamais oubliées.
 
 ### Ouvrir au réseau (deux machines)
 
@@ -151,13 +156,13 @@ pow-blockchain/
 │   ├── chain.py             Blockchain (blocs + état + index par hash), validate_chain, chain_work
 │   ├── codec.py             Transaction / Block <-> dictionnaires JSON (réseau et disque)
 │   ├── protocol.py          catalogue des messages, enveloppe JSON, une ligne par message ; portée des adresses
-│   ├── node.py              Node : logique P2P PURE (gossip, synchronisation, forks, règle N1, portées, plafond d'entrées)
-│   ├── network.py           NodeServer : sockets TCP asyncio + minage par tranches ; délai de hello, adresses IP locales
-│   ├── simulation.py        SimulatedNetwork / FakeClock : plusieurs nœuds en mémoire, déterministe
+│   ├── node.py              Node : logique P2P PURE (gossip, synchronisation, forks, règle N1, portées, plafond d'entrées, tick : rappels et bans)
+│   ├── network.py           NodeServer : sockets TCP asyncio + minage par tranches ; délai de hello, appels avec délai, tick chaque seconde
+│   ├── simulation.py        SimulatedNetwork / FakeClock : plusieurs nœuds en mémoire (hôte « sim-<id> » chacun), déterministe
 │   ├── storage.py           NodeStorage : dossier de données (blocks.jsonl, mempool.jsonl, peers.json)
 │   ├── wallet.py            Wallet : clés chiffrées dans wallet.json (compose keys.py, n'importe pas cryptography)
 │   └── __main__.py          ligne de commande : node (--public, --mine-label), wallet, status ; keygen/send en legacy
-└── tests/                   413 tests unittest ; helpers.py = clés de test déterministes
+└── tests/                   443 tests unittest ; helpers.py = clés de test déterministes
 ```
 
 Chaque module ne dépend que de ceux situés au-dessus de lui dans cette liste.
@@ -318,9 +323,46 @@ mêmes messages, même `PROTOCOL_VERSION`, mêmes blocs.
   affiche ses adresses réseau (`local_ip_addresses()`) au démarrage. Sans
   `--public`, rien ne change par rapport aux parties précédentes.
 
-Ce que cette partie ne fait **pas** : rappeler un pair perdu, bannir un pair
-fautif, oublier une adresse injoignable (résilience, partie suivante), ni
-ouvrir la box (pas d'UPnP ni de traversée de NAT).
+Ce que cette partie ne fait **pas** : ouvrir la box (pas d'UPnP ni de
+traversée de NAT). Le rappel des pairs et les bans sont la Partie 10.
+
+### Résilience (Partie 10)
+
+Toujours de la logique pure dans `node.py`, pilotée par une seule nouveauté
+côté transport : `network.py` appelle `Node.tick()` chaque seconde et lui
+rapporte l'issue de chaque appel (`on_dial_failed`, `on_dial_skipped`, ou
+`on_connect` en cas de succès). Aucun changement de format ni de fichier.
+
+- **Rappel des pairs.** À chaque tick, tant qu'il a moins de `MAX_PEERS` (8)
+  sorties, le nœud appelle des adresses de son carnet : les **amorces**
+  (`--peers`) d'abord, puis les plus récemment vues ; jamais une adresse déjà
+  connectée, en cours d'appel, bannie, ou la sienne. Un appel raté, ou une
+  connexion perdue, repousse le prochain essai de 1, 2, 4… secondes
+  (`RECONNECT_MAX_DELAY` = 5 min au plus) ; une poignée de main réussie remet
+  le compteur à zéro. Un appel dont le transport ne dit rien pendant
+  `DIAL_GRACE_SECONDS` (30 s) est tenu pour raté.
+- **Oubli.** `MAX_DIAL_FAILURES` (12) échecs d'affilée, soit environ 25 min
+  d'essais, font sortir l'adresse du carnet (`AddressForgotten`, fichier
+  réécrit). Les amorces ne sont jamais oubliées ni évincées du carnet, même
+  plein : ce sont les points d'entrée de confiance. Le compteur d'échecs vit
+  en mémoire : au redémarrage, tout le carnet a de nouveau sa chance.
+- **Bannissement.** Un pair **fautif** (message hors protocole ou mal formé,
+  ligne illisible ou trop longue, bloc invalide, lot incohérent, Genesis
+  différent) est déconnecté et son **hôte** banni `BAN_SECONDS` (10 min) :
+  ses connexions sont refusées avant `hello`, son adresse n'est pas rappelée,
+  et le ban se lève seul au tick. Les désagréments bénins (doublon, version
+  inconnue, connexion à soi-même, plafond d'entrées, branche plus légère) ne
+  bannissent pas. **La boucle locale n'est jamais bannie** : `127.0.0.1`,
+  ce sont vos propres processus (autres nœuds, wallet, tests, démos).
+- **Réseau simulé.** Chaque nœud simulé a désormais son propre hôte
+  (`sim-<id>`) : un `Connect` vers un nœud absent ou partitionné échoue
+  vraiment (`on_dial_failed`), `net.tick("A")` fait un tour d'entretien, et
+  un ban frappe un seul nœud, comme avec de vraies adresses.
+
+Ce que cette partie ne fait **pas** : un ban par hôte se contourne en
+changeant d'adresse IP et frappe tous les nœuds derrière une même box ; rien
+ne protège d'un réseau qui ment d'une seule voix (éclipse) si toutes les
+sorties tombent chez des complices, sinon des amorces de confiance.
 
 ### Messages (`protocol.py`)
 
@@ -536,6 +578,11 @@ fichier tronquée réparée ; corruption ailleurs refusée ; écritures atomique
   plafond de connexions entrantes distinct des sorties, connexions muettes
   fermées ; vérifié sur de vraies sockets via l'IP réseau de la machine
   (section 11 de `main.py`, `tests/test_open_network.py`).
+- Résilience : rappel des pairs perdus avec délai croissant (`Node.tick`,
+  appelé chaque seconde par le transport), amorces `--peers` prioritaires et
+  jamais oubliées, adresses mortes oubliées après 12 échecs, hôte d'un pair
+  fautif banni 10 min sauf la boucle locale ; réseau simulé avec un hôte par
+  nœud (section 12 de `main.py`, `tests/test_resilience.py`).
 
 ## Ce qui n'est pas encore implémenté, et pourquoi plus tard
 
@@ -543,7 +590,7 @@ fichier tronquée réparée ; corruption ailleurs refusée ; écritures atomique
 |---|---|
 | Instantané de l'état | Le chargement rejoue toute la chaîne (O(n)). Un instantané périodique des soldes rendrait le démarrage immédiat, au prix d'un second format à garder cohérent avec les blocs. |
 | Frais de transaction | Sans frais, le mempool sert dans l'ordre d'arrivée ; les frais donneraient au mineur une raison d'inclure une transaction plutôt qu'une autre et protégeraient le réseau du spam. |
-| Reconnexion, bannissement | Un pair perdu n'est pas rappelé ; un pair fautif est déconnecté mais peut revenir ; une adresse injoignable reste dans le carnet. Il manque un rappel avec délai croissant, un score de mauvaise conduite et une liste noire temporaire. |
+| Bans contournables, éclipse | Le ban est par hôte : un attaquant change d'IP, et des nœuds honnêtes derrière la même box sont bannis avec le fautif. Rappeler ses pairs ne protège pas d'un réseau de complices qui occuperaient toutes nos sorties (attaque par éclipse) : il faudrait diversifier les sources d'adresses et vérifier plusieurs pairs indépendants. |
 | Traversée de NAT | Un nœud derrière une box n'est joignable que si le port est redirigé à la main ; sinon il reste un client sortant. Pas d'UPnP, pas de relais : hors périmètre d'une blockchain pédagogique. |
 | Synchronisation par en-têtes | Un fork profond se cherche par recul géométrique et la branche est revalidée entièrement ; Bitcoin échange d'abord des en-têtes (block locator). Acceptable tant que les chaînes sont courtes. |
 | Logique des packs de jeu | Le champ `data` et le modèle de comptes sont prêts ; un pack sera un enregistrement attaché à un compte. |

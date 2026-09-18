@@ -37,6 +37,16 @@ aussi des connexions qui ne parlent jamais : sans hello au bout de
 hello_timeout secondes, la connexion est fermée pour ne pas garder une entrée
 occupée pour rien. Le plafond d'entrées (max_inbound) et la portée des
 adresses (ce qu'on annonce à qui) sont dans node.py, logique pure.
+
+Résilience (Partie 10)
+----------------------
+Le serveur appelle Node.tick() toutes les tick_interval secondes : c'est le
+nœud qui décide quelles adresses rappeler (délai croissant, amorces, bans),
+le serveur ne fait qu'exécuter les Connect. Chaque appel a un délai
+(dial_timeout) et son issue est rapportée au nœud : on_dial_failed
+(injoignable), on_dial_skipped (déjà connecté ou déjà en cours), ou
+on_connect quand la connexion existe. Une ligne illisible ou trop longue
+est une faute signalée au nœud (punish), qui déconnecte et bannit l'hôte.
 """
 
 import asyncio
@@ -52,6 +62,8 @@ from .protocol import LOOPBACK, MAX_MESSAGE_BYTES, decode_message, encode_messag
 
 DEFAULT_MINING_CHUNK = 4096  # essais entre deux retours à la boucle réseau (quelques millisecondes)
 HELLO_TIMEOUT_SECONDS = 10.0  # une connexion qui ne s'est pas présentée au bout de ce délai est fermée
+DIAL_TIMEOUT_SECONDS = 10.0  # un appel sortant qui n'aboutit pas dans ce délai est un échec
+TICK_INTERVAL_SECONDS = 1.0  # cadence de Node.tick() (rappel des pairs, bans levés)
 ALL_INTERFACES = frozenset({"0.0.0.0", "", "::"})  # hôtes d'écoute « toutes les interfaces »
 
 
@@ -89,6 +101,8 @@ class NodeServer:
         *,
         mining_chunk: int = DEFAULT_MINING_CHUNK,
         hello_timeout: float | None = HELLO_TIMEOUT_SECONDS,
+        dial_timeout: float = DIAL_TIMEOUT_SECONDS,
+        tick_interval: float = TICK_INTERVAL_SECONDS,
         log: Callable[[str], None] | None = None,
     ) -> None:
         self.node = node
@@ -96,6 +110,9 @@ class NodeServer:
         self.port = port  # 0 = port libre choisi par le système, connu après start()
         self.mining_chunk = mining_chunk
         self.hello_timeout = hello_timeout  # None = attendre le hello indéfiniment
+        self.dial_timeout = dial_timeout
+        self.tick_interval = tick_interval
+        self._tick_task: asyncio.Task | None = None
         self._log = log if log is not None else (lambda text: None)
         self._server: asyncio.base_events.Server | None = None
         self._connections: dict[int, Connection] = {}
@@ -127,8 +144,25 @@ class NodeServer:
             self._log(f"nœud {self.node.node_id[:8]} à l'écoute sur toutes les interfaces, port {self.port} (réseau local : {lan})")
         else:
             self._log(f"nœud {self.node.node_id[:8]} à l'écoute sur {self.address}")
+        self._tick_task = asyncio.create_task(self._tick_forever())
         if self.node.miner_address is not None:
             self.start_mining()
+
+    async def tick_now(self) -> None:
+        """Un entretien immédiat (rappel des pairs du carnet), sans attendre la prochaine seconde."""
+        await self._run(self.node.tick)
+
+    async def _tick_forever(self) -> None:
+        while True:
+            await asyncio.sleep(self.tick_interval)
+            await self._run(self.node.tick)
+
+    async def _run(self, produce: Callable[[], list]) -> None:
+        """Appelle produce() (une méthode du nœud) et exécute ses actions ; une StorageError arrête le nœud."""
+        try:
+            await self._execute(produce())
+        except StorageError as error:
+            self._fail(error)
 
     def start_mining(self, miner_address: str | None = None) -> None:
         """Lance (ou relance) la boucle de minage, pour l'adresse du nœud ou celle fournie."""
@@ -152,7 +186,11 @@ class NodeServer:
         return self._mining_task is not None and not self._mining_task.done()
 
     async def stop(self) -> None:
-        """Arrête le minage, ferme toutes les connexions et le port d'écoute."""
+        """Arrête l'entretien et le minage, ferme toutes les connexions et le port d'écoute."""
+        if self._tick_task is not None:
+            self._tick_task.cancel()
+            await asyncio.gather(self._tick_task, return_exceptions=True)
+            self._tick_task = None
         await self.stop_mining()
         for task in list(self._background):
             task.cancel()
@@ -167,16 +205,24 @@ class NodeServer:
             self._server = None
 
     async def connect(self, address: str) -> bool:
-        """Ouvre une connexion sortante vers « hôte:port » ; False si déjà connecté ou injoignable."""
+        """Ouvre une connexion sortante vers « hôte:port » ; False si déjà connecté, déjà en cours ou injoignable.
+
+        Le nœud est tenu au courant de l'issue : on_dial_skipped (rien à faire),
+        on_dial_failed (échec : il planifiera un rappel) ou on_connect (succès).
+        """
         host, port = parse_address(address)
         address = format_address(host, port)
         if address in self._dialing or any(c.address == address for c in self._connections.values()):
+            await self._run(lambda: self.node.on_dial_skipped(address))
             return False
         self._dialing.add(address)
         try:
-            reader, writer = await asyncio.open_connection(host, port, limit=MAX_MESSAGE_BYTES)
-        except OSError as error:
-            self._log(f"connexion à {address} impossible : {error}")
+            reader, writer = await asyncio.wait_for(
+                asyncio.open_connection(host, port, limit=MAX_MESSAGE_BYTES), self.dial_timeout
+            )
+        except (OSError, asyncio.TimeoutError) as error:
+            self._log(f"connexion à {address} impossible : {error or f'aucune réponse en {self.dial_timeout:g} s'}")
+            await self._run(lambda: self.node.on_dial_failed(address))
             return False
         finally:
             self._dialing.discard(address)
@@ -222,8 +268,8 @@ class NodeServer:
                 except asyncio.TimeoutError:
                     self._log(f"pair {peer_id} : aucun hello en {self.hello_timeout:g} s, connexion fermée")
                     break
-                except ValueError:  # ligne plus longue que MAX_MESSAGE_BYTES
-                    self._log(f"pair {peer_id} : message trop volumineux, connexion fermée")
+                except ValueError:  # ligne plus longue que MAX_MESSAGE_BYTES : faute, le nœud bannit
+                    await self._execute(self.node.punish(peer_id, f"message de plus de {MAX_MESSAGE_BYTES} octets"))
                     break
                 awaiting_hello = False
                 if not line:
@@ -231,7 +277,7 @@ class NodeServer:
                 try:
                     msg = decode_message(line)
                 except ProtocolError as error:
-                    self._log(f"pair {peer_id} : {error}, connexion fermée")
+                    await self._execute(self.node.punish(peer_id, f"ligne illisible : {error}"))
                     break
                 await self._execute(self.node.on_message(peer_id, msg))
         except (ConnectionError, asyncio.IncompleteReadError, OSError):

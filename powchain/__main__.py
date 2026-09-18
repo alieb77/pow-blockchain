@@ -19,7 +19,10 @@
 
 Un nœud persiste par défaut dans data/node-<port>/ (blocs, mempool, carnet
 d'adresses, voir storage.py) : relancé, il reprend sa chaîne et se reconnecte
-seul aux adresses connues. --memory désactive toute écriture.
+seul aux adresses connues. --memory désactive toute écriture. Les adresses
+de --peers sont des AMORCES : rappelées en priorité, jamais oubliées ; les
+autres adresses du carnet sont rappelées avec un délai croissant et oubliées
+après une douzaine d'échecs d'affilée (node.py, Partie 10).
 
 Par défaut un nœud n'écoute que sur 127.0.0.1 : seule sa machine peut le
 joindre. « --public » l'ouvre sur toutes les interfaces (0.0.0.0) : les autres
@@ -56,7 +59,7 @@ from .errors import PowChainError, WalletError
 from .keys import KeyPair
 from .money import format_units, parse_coin_amount
 from .network import NodeServer, local_ip_addresses
-from .node import MAX_PEERS, Node
+from .node import Node
 from .protocol import (
     ACCOUNT,
     GET_ACCOUNT,
@@ -141,8 +144,8 @@ async def run_node(args: argparse.Namespace) -> None:
     if miner_address:
         origin = f" (clé « {args.mine_label} » du wallet {args.wallet})" if args.mine_label else ""
         timestamped(f"minage vers {to_checksummed_address(miner_address)[:16]}...{origin}")
-    for address in list(dict.fromkeys(args.peers + list(node.known_addresses)))[:MAX_PEERS]:
-        await server.connect(address)
+    node.remember_addresses(args.peers, seed=True)  # amorces : rappelées d'abord, jamais oubliées
+    await server.tick_now()  # premiers appels tout de suite ; ensuite le nœud entretient ses pairs seul
 
     stop = asyncio.Event()
     loop = asyncio.get_running_loop()
@@ -165,7 +168,8 @@ async def run_node(args: argparse.Namespace) -> None:
                 timestamped(
                     f"hauteur {node.height}, travail {node.work}, difficulté {node.tip.difficulty}, "
                     f"{len(node.peers)} pair(s) dont {sum(1 for peer in node.peers if not peer.outbound)} entrant(s), "
-                    f"{len(node.mempool)} transaction(s) en attente"
+                    f"{len(node.known_addresses)} adresse(s) connue(s), {len(node.mempool)} transaction(s) en attente"
+                    + (f", {len(node.banned_hosts)} hôte(s) banni(s)" if node.banned_hosts else "")
                     + (
                         f", {server.blocks_mined} bloc(s) miné(s) ici, "
                         f"solde du mineur {format_units(node.chain.state.balance_of(miner_address))}"
