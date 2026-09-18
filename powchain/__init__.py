@@ -11,13 +11,21 @@ asyncio, réseau simulé, ligne de commande (python -m powchain).
 Partie 6 : persistance sur disque (NodeStorage : blocs, mempool, carnet
 d'adresses ; revalidation complète au chargement, réparation d'une fin de
 fichier tronquée, écritures atomiques).
+Partie 7 : wallet (Wallet : clés chiffrées par mot de passe via scrypt +
+AES-256-GCM, somme de contrôle d'adresse façon EIP-55, sauvegarde par graine).
 
 Ce module ré-exporte l'API publique pour permettre d'écrire simplement :
 
     from powchain import KeyPair, Blockchain, Mempool, create_signed_transaction, create_block, mine_block
 """
 
-from .address import ADDRESS_LENGTH, is_valid_address
+from .address import (
+    ADDRESS_LENGTH,
+    has_valid_checksum,
+    is_valid_address,
+    normalize_address,
+    to_checksummed_address,
+)
 from .block import (
     GENESIS_DIFFICULTY,
     GENESIS_INDEX,
@@ -50,10 +58,14 @@ from .errors import (
     SerializationError,
     StorageError,
     ValidationError,
+    WalletError,
 )
 from .keys import (
     SIGNATURE_HEX_LENGTH,
     KeyPair,
+    aead_decrypt,
+    aead_encrypt,
+    derive_symmetric_key,
     is_valid_public_key_hex,
     is_valid_signature_hex,
     verify_signature,
@@ -117,14 +129,25 @@ from .transaction import (
     validate_transaction,
     verify_transaction_signature,
 )
+from .wallet import DEFAULT_WALLET_PATH, Wallet, WalletEntry
 
-__version__ = "0.6.0"
+__version__ = "0.7.0"
 
 __all__ = [
     "ADDRESS_LENGTH",
     "ADJUSTMENT_DIVISOR",
     "COINBASE_ADDRESS",
     "COIN_SYMBOL",
+    "DEFAULT_WALLET_PATH",
+    "Wallet",
+    "WalletEntry",
+    "WalletError",
+    "aead_decrypt",
+    "aead_encrypt",
+    "derive_symmetric_key",
+    "has_valid_checksum",
+    "normalize_address",
+    "to_checksummed_address",
     "AddressLearned",
     "BlockAdded",
     "ChainReorganized",

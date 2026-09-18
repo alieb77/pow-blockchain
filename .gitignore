@@ -3,3 +3,6 @@ __pycache__/
 .pytest_cache/
 .venv/
 data/
+# Wallets : un fichier de clés (même chiffrées) ne se commite jamais.
+wallet.json
+*.wallet.json

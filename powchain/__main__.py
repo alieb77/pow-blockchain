@@ -1,32 +1,50 @@
-"""Ligne de commande : lancer un nœud, générer une clé, interroger ou payer.
+"""Ligne de commande : lancer un nœud, gérer un wallet, interroger ou payer.
 
     python -m powchain node --port 5000 [--peers 127.0.0.1:5001,...] [--mine ADRESSE]
                             [--data-dir DOSSIER | --memory]
-    python -m powchain keygen
     python -m powchain status --node 127.0.0.1:5000 [--address ADRESSE]
-    python -m powchain send --node 127.0.0.1:5000 --seed-hex GRAINE --to ADRESSE --amount 1.5
+
+    python -m powchain wallet create [--wallet FICHIER] [--label NOM]
+    python -m powchain wallet generate [--label NOM]
+    python -m powchain wallet import --seed-hex GRAINE [--label NOM]
+    python -m powchain wallet list
+    python -m powchain wallet address --label NOM
+    python -m powchain wallet balance --node 127.0.0.1:5000 [--label NOM]
+    python -m powchain wallet send --node 127.0.0.1:5000 --from NOM --to ADRESSE --amount 1.5
+    python -m powchain wallet export --label NOM
+
+    python -m powchain keygen                              (legacy : clé jetable en clair)
+    python -m powchain send --seed-hex GRAINE ...          (legacy : pis-aller, préférez wallet)
 
 Un nœud persiste par défaut dans data/node-<port>/ (blocs, mempool, carnet
 d'adresses, voir storage.py) : relancé, il reprend sa chaîne et se reconnecte
 seul aux adresses connues. --memory désactive toute écriture.
 
-« status » et « send » sont des CLIENTS ÉPHÉMÈRES : ils ouvrent une connexion
-vers un nœud, se présentent (hello sans port d'écoute), envoient leur
-demande, lisent la réponse et se déconnectent. Un nœud ne fait aucune
-différence entre un client et un pair : mêmes messages, mêmes règles.
+« status », « send » et les commandes « wallet balance/send » sont des CLIENTS
+ÉPHÉMÈRES : ils ouvrent une connexion vers un nœud, se présentent (hello sans
+port d'écoute), envoient leur demande, lisent la réponse et se déconnectent. Un
+nœud ne fait aucune différence entre un client et un pair : mêmes messages,
+mêmes règles.
 
-La graine privée passée en argument à « send » est un pis-aller de démo : la
-gestion des clés (chiffrement, suivi des séquences) sera le rôle du wallet.
+Le wallet (wallet.py) garde les clés CHIFFRÉES sous un mot de passe : la graine
+ne transite jamais en clair par la ligne de commande. Le mot de passe est
+demandé de façon interactive (getpass) ; en contexte non interactif (scripts,
+démo) il peut être lu dans la variable d'environnement POWCHAIN_WALLET_PASSWORD.
+Les anciennes commandes « keygen » et « send --seed-hex » restent disponibles
+comme dépannage, mais exposent la graine.
 """
 
 import argparse
 import asyncio
+import getpass
+import os
 import signal
 import sys
 import time
+from pathlib import Path
 
-from .address import is_valid_address
-from .errors import PowChainError
+from .address import is_valid_address, normalize_address, to_checksummed_address
+from .errors import PowChainError, WalletError
 from .keys import KeyPair
 from .money import format_units, parse_coin_amount
 from .network import NodeServer
@@ -48,8 +66,10 @@ from .block import create_genesis_block
 from .codec import transaction_to_dict
 from .storage import NodeStorage
 from .transaction import create_signed_transaction
+from .wallet import DEFAULT_WALLET_PATH, Wallet
 
 STATUS_INTERVAL_SECONDS = 10
+WALLET_PASSWORD_ENV = "POWCHAIN_WALLET_PASSWORD"
 
 
 def timestamped(text: str) -> None:
@@ -203,6 +223,154 @@ def run_keygen(args: argparse.Namespace) -> None:
     print(f"adresse (publique) : {key.address}")
     print(f"graine (PRIVÉE)    : {key.seed_hex}")
     print("Conservez la graine : elle seule permet de signer au nom de cette adresse.")
+    print("(legacy : la graine est en clair ; préférez « wallet create » qui la chiffre.)")
+
+
+# ---------------------------------------------------------------- wallet
+
+
+def read_password(prompt: str, *, confirm: bool = False) -> str:
+    """Demande un mot de passe sans l'afficher (getpass), ou le lit dans l'environnement.
+
+    En contexte non interactif (pas de terminal, scripts, démo), la variable
+    POWCHAIN_WALLET_PASSWORD sert d'échappatoire, ce qui évite de passer le mot
+    de passe en argument de commande (où il serait visible).
+    """
+    from_env = os.environ.get(WALLET_PASSWORD_ENV)
+    if from_env is not None:
+        return from_env
+    password = getpass.getpass(prompt)
+    if not password:
+        raise ValueError("mot de passe vide")
+    if confirm and getpass.getpass("Confirmez le mot de passe : ") != password:
+        raise ValueError("les deux mots de passe diffèrent")
+    return password
+
+
+def _load_wallet(path: str) -> Wallet:
+    if not Path(path).exists():
+        raise WalletError(f"aucun wallet à {path} (créez-en un avec « wallet create »)")
+    return Wallet.load(path)
+
+
+def _announce_key(label: str, address: str) -> None:
+    print(f"clé « {label} » ajoutée")
+    print(f"  adresse (à partager) : {to_checksummed_address(address)}")
+
+
+def wallet_create(args: argparse.Namespace) -> None:
+    path = Path(args.wallet)
+    if path.exists():
+        raise WalletError(f"un fichier existe déjà à {args.wallet} ; choisissez un autre --wallet")
+    password = read_password("Nouveau mot de passe du wallet : ", confirm=True)
+    wallet = Wallet.create(path)
+    key = wallet.generate_key(password, label=args.label)
+    wallet.save()
+    print(f"wallet créé : {path}")
+    _announce_key(args.label, key.address)
+    print("  Mémorisez le mot de passe : il n'y a AUCUNE récupération possible s'il est perdu.")
+
+
+def wallet_generate(args: argparse.Namespace) -> None:
+    wallet = _load_wallet(args.wallet)
+    label = args.label or wallet.suggest_label()
+    password = read_password("Mot de passe du wallet : ")
+    key = wallet.generate_key(password, label=label)
+    wallet.save()
+    _announce_key(label, key.address)
+
+
+def wallet_import(args: argparse.Namespace) -> None:
+    wallet = _load_wallet(args.wallet)
+    label = args.label or wallet.suggest_label()
+    password = read_password("Mot de passe du wallet : ")
+    key = wallet.import_seed_hex(args.seed_hex, password, label=label)
+    wallet.save()
+    _announce_key(label, key.address)
+
+
+def wallet_list(args: argparse.Namespace) -> None:
+    wallet = _load_wallet(args.wallet)
+    if not len(wallet):
+        print(f"wallet vide : {args.wallet}")
+        return
+    print(f"{len(wallet)} clé(s) dans {args.wallet} :")
+    for entry in wallet.entries:
+        print(f"  {entry.label:<16} {to_checksummed_address(entry.address)}")
+
+
+def wallet_address(args: argparse.Namespace) -> None:
+    print(_load_wallet(args.wallet).checksummed_address_of(args.label))
+
+
+def wallet_export(args: argparse.Namespace) -> None:
+    wallet = _load_wallet(args.wallet)
+    password = read_password(f"Mot de passe du wallet (révéler « {args.label} ») : ")
+    seed = wallet.export_seed_hex(args.label, password)
+    print(f"graine (PRIVÉE) de « {args.label} » : {seed}")
+    print("Quiconque détient cette graine peut dépenser. Conservez-la hors ligne.")
+
+
+async def wallet_balance(args: argparse.Namespace) -> None:
+    wallet = _load_wallet(args.wallet)
+    entries = [wallet.entry(args.label)] if args.label else list(wallet.entries)
+    if not entries:
+        print(f"wallet vide : {args.wallet}")
+        return
+    for entry in entries:
+        replies = await request(args.node, [message(GET_ACCOUNT, address=entry.address)], [HELLO, ACCOUNT])
+        account = replies[1]
+        print(f"« {entry.label} »  {to_checksummed_address(entry.address)}")
+        print(f"    solde confirmé  {format_units(account['balance'])} (séquence suivante {account['next_sequence']})")
+        print(f"    solde projeté   {format_units(account['projected_balance'])} (séquence suivante {account['projected_next_sequence']})")
+
+
+async def wallet_send(args: argparse.Namespace) -> None:
+    wallet = _load_wallet(args.wallet)
+    try:
+        recipient = normalize_address(args.to, require_checksum=not args.unchecked)
+    except ValueError as error:
+        raise WalletError(str(error)) from None
+    amount = parse_coin_amount(args.amount)
+    password = read_password(f"Mot de passe du wallet (signer depuis « {args.from_label} ») : ")
+    key = wallet.key_pair(args.from_label, password)
+    sequence = args.sequence
+    if sequence is None:
+        (account,) = (await request(args.node, [message(GET_ACCOUNT, address=key.address)], [HELLO, ACCOUNT]))[1:]
+        sequence = account["projected_next_sequence"]
+    transaction = create_signed_transaction(key, recipient, amount, args.data, sequence)
+    replies = await request(
+        args.node,
+        [message(NEW_TRANSACTION, transaction=transaction_to_dict(transaction)), message(GET_ACCOUNT, address=key.address)],
+        [HELLO, ACCOUNT],
+    )
+    last = replies[-1]
+    if last.type == REJECT:
+        print(f"REFUSÉE : {last['reason']}")
+        sys.exit(1)
+    print(f"transaction {transaction.hash} envoyée à {args.node}")
+    print(f"  {format_units(amount)} de « {args.from_label} » vers {to_checksummed_address(recipient)[:20]}..., séquence {sequence}")
+    print(f"  solde projeté après envoi : {format_units(last['projected_balance'])}")
+
+
+def run_wallet(args: argparse.Namespace) -> None:
+    """Aiguille vers la bonne sous-commande wallet (synchrones, ou réseau via asyncio)."""
+    if args.wallet_command == "create":
+        wallet_create(args)
+    elif args.wallet_command == "generate":
+        wallet_generate(args)
+    elif args.wallet_command == "import":
+        wallet_import(args)
+    elif args.wallet_command == "list":
+        wallet_list(args)
+    elif args.wallet_command == "address":
+        wallet_address(args)
+    elif args.wallet_command == "export":
+        wallet_export(args)
+    elif args.wallet_command == "balance":
+        asyncio.run(wallet_balance(args))
+    elif args.wallet_command == "send":
+        asyncio.run(wallet_send(args))
 
 
 # ------------------------------------------------------------------ main
@@ -232,14 +400,56 @@ def build_parser() -> argparse.ArgumentParser:
     status.add_argument("--node", default="127.0.0.1:5000")
     status.add_argument("--address", type=address_argument, default=None, help="afficher aussi ce compte")
 
-    send = commands.add_parser("send", help="signer et envoyer un paiement à un nœud")
+    send = commands.add_parser("send", help="legacy : payer via une graine passée en argument (préférez « wallet send »)")
     send.add_argument("--node", default="127.0.0.1:5000")
     send.add_argument("--seed-hex", required=True, help="graine privée de l'expéditeur (64 hex)")
     send.add_argument("--to", type=address_argument, required=True)
     send.add_argument("--amount", required=True, help="montant en COIN, ex. 1.5")
     send.add_argument("--data", default="")
     send.add_argument("--sequence", type=int, default=None, help="sinon demandée au nœud")
+
+    _build_wallet_parser(commands)
     return parser
+
+
+def _build_wallet_parser(commands: "argparse._SubParsersAction") -> None:
+    """Sous-commandes du wallet : create, generate, import, list, address, balance, send, export."""
+    common = argparse.ArgumentParser(add_help=False)
+    common.add_argument("--wallet", default=DEFAULT_WALLET_PATH, metavar="FICHIER", help="fichier du wallet (défaut : wallet.json)")
+
+    wallet = commands.add_parser("wallet", help="gérer un wallet de clés chiffrées par mot de passe")
+    sub = wallet.add_subparsers(dest="wallet_command", required=True)
+
+    create = sub.add_parser("create", parents=[common], help="créer un wallet et sa première clé")
+    create.add_argument("--label", default="principal", help="nom de la première clé (défaut : principal)")
+
+    generate = sub.add_parser("generate", parents=[common], help="ajouter une nouvelle clé aléatoire")
+    generate.add_argument("--label", default=None, help="nom de la clé (auto si omis)")
+
+    imp = sub.add_parser("import", parents=[common], help="ajouter une clé depuis sa graine hexadécimale")
+    imp.add_argument("--seed-hex", required=True, help="graine privée de 64 hex à importer")
+    imp.add_argument("--label", default=None, help="nom de la clé (auto si omis)")
+
+    sub.add_parser("list", parents=[common], help="lister les clés et leurs adresses")
+
+    address = sub.add_parser("address", parents=[common], help="afficher l'adresse (à somme de contrôle) d'une clé")
+    address.add_argument("--label", required=True)
+
+    balance = sub.add_parser("balance", parents=[common], help="interroger un nœud pour le solde des clés")
+    balance.add_argument("--node", default="127.0.0.1:5000")
+    balance.add_argument("--label", default=None, help="une seule clé (sinon toutes)")
+
+    wsend = sub.add_parser("send", parents=[common], help="signer et envoyer un paiement depuis une clé du wallet")
+    wsend.add_argument("--node", default="127.0.0.1:5000")
+    wsend.add_argument("--from", dest="from_label", required=True, metavar="NOM", help="clé expéditrice (label du wallet)")
+    wsend.add_argument("--to", required=True, metavar="ADRESSE", help="adresse destinataire (forme à somme de contrôle)")
+    wsend.add_argument("--amount", required=True, help="montant en COIN, ex. 1.5")
+    wsend.add_argument("--data", default="")
+    wsend.add_argument("--sequence", type=int, default=None, help="sinon demandée au nœud")
+    wsend.add_argument("--unchecked", action="store_true", help="accepter une adresse --to sans somme de contrôle vérifiée")
+
+    export = sub.add_parser("export", parents=[common], help="révéler la graine d'une clé (pour une sauvegarde)")
+    export.add_argument("--label", required=True)
 
 
 def main(argv: list[str] | None = None) -> None:
@@ -257,6 +467,8 @@ def main(argv: list[str] | None = None) -> None:
             asyncio.run(run_status(args))
         elif args.command == "send":
             asyncio.run(run_send(args))
+        elif args.command == "wallet":
+            run_wallet(args)
     except KeyboardInterrupt:
         print()
     except (PowChainError, OSError, TimeoutError, ValueError) as error:

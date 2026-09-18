@@ -1,4 +1,4 @@
-"""Démonstration des Parties 1 à 6 : hashes, preuve de travail, signatures, soldes, mempool, réseau P2P, disque.
+"""Démonstration des Parties 1 à 7 : hashes, PoW, signatures, soldes, mempool, réseau P2P, disque, wallet.
 
 Lancer depuis le dossier du projet :
 
@@ -9,8 +9,9 @@ fait circuler les pièces via le mempool, simule des attaques (rejeu,
 récompense gonflée, dépense au-delà du solde, double dépense), puis fait
 vivre plusieurs nœuds : d'abord sur un réseau simulé et déterministe (forks,
 règle du plus grand travail, borne d'horloge, attaque majoritaire), puis sur
-de vraies sockets TCP locales, et enfin montre ce qu'un nœud écrit sur le
-disque et ce qu'il refuse d'y relire.
+de vraies sockets TCP locales, montre ce qu'un nœud écrit sur le disque et ce
+qu'il refuse d'y relire, et enfin un wallet qui chiffre ses clés et met une
+somme de contrôle sur les adresses.
 """
 
 import asyncio
@@ -41,6 +42,8 @@ from powchain import (
     State,
     StorageError,
     Transaction,
+    Wallet,
+    WalletError,
     block_reward,
     block_to_dict,
     create_block,
@@ -49,8 +52,10 @@ from powchain import (
     create_transaction,
     format_units,
     is_valid_chain,
+    is_valid_transaction,
     message,
     mine_block,
+    normalize_address,
     parse_coin_amount,
     validate_chain,
 )
@@ -514,6 +519,70 @@ def demo_persistence(wallets: dict[str, KeyPair], names: dict[str, str]) -> None
         print("    par la règle du plus grand travail, dit quelle chaîne valide est la bonne.")
 
 
+# ----------------------------------------------------------------------------
+# Partie 7 : wallet (clés chiffrées, somme de contrôle d'adresse)
+# ----------------------------------------------------------------------------
+
+
+def demo_wallet(wallets: dict[str, KeyPair]) -> None:
+    print_title("9. Wallet : des clés chiffrées par mot de passe, une adresse à somme de contrôle")
+    password = "corriger-cheval-pile-agrafe"  # une vraie phrase de passe, ici en clair pour la démo
+    with tempfile.TemporaryDirectory() as tmp:
+        path = Path(tmp) / "wallet.json"
+
+        print("\n[9a] Création. Le wallet chiffre chaque graine (scrypt + AES-256-GCM) : rien en clair sur le disque.")
+        wallet = Wallet.create(path)
+        alice = wallet.generate_key(password, label="alice")
+        wallet.import_seed_hex(wallets["bob"].seed_hex, password, label="bob")
+        wallet.save()
+        raw = path.read_bytes()
+        print(f"    {path.name} : {len(raw)} octets, {len(wallet)} clés.")
+        print(f"    la graine d'alice ({alice.seed_hex[:16]}...) apparaît-elle en clair dans le fichier ? "
+              f"{alice.seed_hex.encode() in raw}")
+
+        print("\n[9b] Déverrouillage. Le bon mot de passe rend la clé ; un mauvais échoue (tag AES-GCM), sans rien deviner.")
+        recovered = wallet.key_pair("alice", password)
+        print(f"    clé alice retrouvée à l'identique : {recovered.seed_hex == alice.seed_hex}")
+        try:
+            wallet.key_pair("alice", "pas le bon mot de passe")
+            print("    mauvais mot de passe accepté ?!")
+        except WalletError as error:
+            print(f"    mauvais mot de passe : {error}")
+
+        print("\n[9c] Une clé du wallet signe une vraie transaction, acceptée par les règles de la chaîne (R1-R7),")
+        print("     sans que la graine quitte jamais le wallet en clair.")
+        tx = create_signed_transaction(recovered, wallet.address_of("bob"), parse_coin_amount("1"), sequence=0)
+        print(f"    is_valid_transaction : {is_valid_transaction(tx)}")
+
+        print("\n[9d] Somme de contrôle d'adresse (façon EIP-55, adaptée à SHA-256). La CASSE encode un contrôle :")
+        print("     l'adresse on-chain reste le hex brut, mais une faute de frappe est repérée avant tout envoi.")
+        shared = wallet.checksummed_address_of("alice")
+        print(f"    adresse à partager   : {shared}")
+        print(f"    inscrite dans la tx  : {normalize_address(shared)}")
+        typo = shared[:-1] + ("0" if shared[-1] != "0" else "1")
+        try:
+            normalize_address(typo)
+            print("    faute de frappe acceptée ?!")
+        except ValueError:
+            print(f"    dernier caractère changé ({shared[-1]} -> {typo[-1]}) : REFUSÉE avant tout envoi")
+
+        print("\n[9e] Limite honnête. (1) Intégrité : un octet du chiffré modifié => déverrouillage impossible,")
+        print("     jamais une graine fausse rendue en silence (comme le disque du nœud en 8d).")
+        data = wallet.to_dict()
+        cipher = bytearray.fromhex(data["keys"][0]["ciphertext"])
+        cipher[0] ^= 1
+        data["keys"][0]["ciphertext"] = cipher.hex()
+        try:
+            Wallet.from_dict(data).key_pair("alice", password)
+            print("    fichier modifié accepté ?!")
+        except WalletError as error:
+            print(f"    fichier modifié : {error}")
+        print("     (2) Ce que le wallet NE protège PAS : un mot de passe faible reste cassable hors ligne (scrypt")
+        print("     ralentit chaque essai, ne l'empêche pas) ; un mot de passe PERDU = fonds perdus, aucune")
+        print("     récupération (sauvegardez la graine via « wallet export ») ; et la somme de contrôle attrape")
+        print("     les fautes de frappe, pas l'envoi volontaire à une adresse valide qui n'est à personne.")
+
+
 def main() -> None:
     wallets, names = demo_keys()
     chain, pool = demo_genesis_and_first_reward(wallets, names)
@@ -523,6 +592,7 @@ def main() -> None:
     demo_simulated_network(wallets, names)
     asyncio.run(demo_real_sockets(wallets))
     demo_persistence(wallets, names)
+    demo_wallet(wallets)
     print()
 
 

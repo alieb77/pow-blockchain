@@ -31,10 +31,13 @@ Conventions d'encodage
   (voir transaction.py).
 """
 
+import os
 import re
 
-from cryptography.exceptions import InvalidSignature
+from cryptography.exceptions import InvalidSignature, InvalidTag
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey, Ed25519PublicKey
+from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+from cryptography.hazmat.primitives.kdf.scrypt import Scrypt
 
 PRIVATE_KEY_BYTES = 32
 PUBLIC_KEY_BYTES = 32
@@ -129,3 +132,78 @@ def verify_signature(public_key_hex: str, signature_hex: str, message: bytes) ->
     except (InvalidSignature, ValueError):
         return False
     return True
+
+
+# --------------------------------------------------------------------------
+# Chiffrement d'un secret par mot de passe (Partie 7 : wallet)
+#
+# Le wallet doit garder des graines privées sur le disque sans les y écrire en
+# clair. Deux primitives suffisent, toutes deux tirées de la bibliothèque
+# cryptography (jamais réimplémentées, comme le reste de ce module) :
+#
+# * une FONCTION DE DÉRIVATION DE CLÉ (scrypt) qui transforme un mot de passe
+#   humain en une clé de 32 octets. scrypt est « coûteuse en mémoire » : elle
+#   ralentit délibérément chaque essai, ce qui rend une attaque par
+#   dictionnaire sur un mot de passe volé bien plus chère qu'un simple hash.
+#   Le sel (aléatoire, stocké en clair à côté) fait que deux wallets protégés
+#   par le même mot de passe n'ont pas la même clé : pas de table précalculée.
+# * un CHIFFREMENT AUTHENTIFIÉ (AES-256-GCM) qui chiffre ET signe : au
+#   déchiffrement, un mot de passe erroné ou un octet modifié fait échouer la
+#   vérification du tag (InvalidTag) au lieu de rendre des octets faux. On peut
+#   lier des données publiques au chiffré (associated_data) : elles ne sont pas
+#   chiffrées mais leur altération invalide aussi le tag (le wallet y met
+#   l'adresse, pour qu'un chiffré ne puisse pas être recollé sous une autre).
+#
+# Coût de scrypt : n * r * 128 octets de mémoire. n = 2^15, r = 8 => 32 Mio et
+# quelques dizaines de millisecondes par essai. Ces paramètres sont stockés
+# avec le sel, donc augmentables plus tard sans casser les anciens fichiers.
+SCRYPT_N = 1 << 15
+SCRYPT_R = 8
+SCRYPT_P = 1
+KDF_SALT_BYTES = 16
+AEAD_KEY_BYTES = 32  # AES-256
+AEAD_NONCE_BYTES = 12  # taille de nonce recommandée pour GCM
+
+
+def derive_symmetric_key(
+    password: str, salt: bytes, *, n: int = SCRYPT_N, r: int = SCRYPT_R, p: int = SCRYPT_P
+) -> bytes:
+    """Dérive une clé de 32 octets d'un mot de passe et d'un sel, par scrypt."""
+    if not isinstance(password, str):
+        raise TypeError(f"mot de passe (str) attendu, reçu {type(password).__name__}")
+    if not isinstance(salt, (bytes, bytearray)) or len(salt) != KDF_SALT_BYTES:
+        raise ValueError(f"sel de {KDF_SALT_BYTES} octets attendu")
+    kdf = Scrypt(salt=bytes(salt), length=AEAD_KEY_BYTES, n=n, r=r, p=p)
+    return kdf.derive(password.encode("utf-8"))
+
+
+def aead_encrypt(key: bytes, plaintext: bytes, associated_data: bytes = b"") -> tuple[bytes, bytes]:
+    """Chiffre plaintext sous key (AES-256-GCM) et retourne (nonce aléatoire, chiffré+tag)."""
+    _require_key(key)
+    if not isinstance(plaintext, (bytes, bytearray)):
+        raise TypeError(f"plaintext en octets attendu, reçu {type(plaintext).__name__}")
+    if not isinstance(associated_data, (bytes, bytearray)):
+        raise TypeError("associated_data en octets attendu")
+    nonce = os.urandom(AEAD_NONCE_BYTES)
+    ciphertext = AESGCM(bytes(key)).encrypt(nonce, bytes(plaintext), bytes(associated_data))
+    return nonce, ciphertext
+
+
+def aead_decrypt(key: bytes, nonce: bytes, ciphertext: bytes, associated_data: bytes = b"") -> bytes:
+    """Déchiffre et vérifie le tag. Lève ValueError si la clé est fausse ou les données altérées."""
+    _require_key(key)
+    if not isinstance(nonce, (bytes, bytearray)) or len(nonce) != AEAD_NONCE_BYTES:
+        raise ValueError(f"nonce de {AEAD_NONCE_BYTES} octets attendu")
+    if not isinstance(ciphertext, (bytes, bytearray)):
+        raise TypeError(f"ciphertext en octets attendu, reçu {type(ciphertext).__name__}")
+    if not isinstance(associated_data, (bytes, bytearray)):
+        raise TypeError("associated_data en octets attendu")
+    try:
+        return AESGCM(bytes(key)).decrypt(bytes(nonce), bytes(ciphertext), bytes(associated_data))
+    except InvalidTag:
+        raise ValueError("déchiffrement impossible : mot de passe erroné ou données altérées") from None
+
+
+def _require_key(key: object) -> None:
+    if not isinstance(key, (bytes, bytearray)) or len(key) != AEAD_KEY_BYTES:
+        raise ValueError(f"clé symétrique de {AEAD_KEY_BYTES} octets attendue")

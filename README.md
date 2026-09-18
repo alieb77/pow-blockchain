@@ -1,15 +1,18 @@
-# powchain — Parties 1 à 6 : hashes, preuve de travail, signatures, soldes, mempool, réseau P2P, disque
+# powchain — Parties 1 à 7 : hashes, preuve de travail, signatures, soldes, mempool, réseau P2P, disque, wallet
 
 Blockchain Proof of Work construite pas à pas en Python (3.10 ou plus récent).
-Une seule dépendance externe, `cryptography`, pour les signatures Ed25519.
-Le réseau et le stockage n'utilisent que la bibliothèque standard (`asyncio`, `json`).
+Une seule dépendance externe, `cryptography`, pour les signatures Ed25519 **et**
+le chiffrement du wallet (scrypt + AES-256-GCM). Le réseau et le stockage
+n'utilisent que la bibliothèque standard (`asyncio`, `json`).
 
 > Depuis la Partie 5, plusieurs nœuds peuvent tourner dans plusieurs
 > terminaux (ou machines d'un même réseau local), s'échanger transactions et
 > blocs, se rattraper et résoudre les forks par la règle du plus grand
 > travail cumulé. Depuis la Partie 6, un nœud relancé reprend sa chaîne, son
 > mempool et ses pairs depuis son dossier de données, après revalidation
-> complète. Le wallet, les frais et les packs de jeu viendront ensuite.
+> complète. Depuis la Partie 7, un wallet garde les clés chiffrées sous un mot
+> de passe et protège les adresses par une somme de contrôle : la graine
+> privée ne transite plus en clair. Les frais et les packs de jeu viendront ensuite.
 
 ## Installer et lancer
 
@@ -17,13 +20,13 @@ Le réseau et le stockage n'utilisent que la bibliothèque standard (`asyncio`, 
 pip install -r requirements.txt
 ```
 
-Démonstration complète (Parties 1 à 6 : réseau simulé, vraies sockets, disque) :
+Démonstration complète (Parties 1 à 7 : réseau simulé, vraies sockets, disque, wallet) :
 
 ```bash
 python main.py
 ```
 
-Tests (336, environ 7 s ; une quinzaine utilisent de vraies sockets locales) :
+Tests (368, environ 8 s ; une quinzaine utilisent de vraies sockets locales) :
 
 ```bash
 python -m unittest -v
@@ -31,14 +34,15 @@ python -m unittest -v
 
 ### Faire tourner des nœuds dans plusieurs terminaux
 
-Terminal 1 : générer une clé, puis lancer un nœud qui mine pour elle.
+Terminal 1 : créer un wallet (mot de passe demandé, jamais affiché), noter
+l'adresse de la clé « mineur », puis lancer un nœud qui mine pour elle.
 
 ```bash
-python -m powchain keygen
+python -m powchain wallet create --label mineur
 ```
 
 ```bash
-python -m powchain node --port 5000 --mine <adresse affichée par keygen>
+python -m powchain node --port 5000 --mine <adresse affichée par wallet create>
 ```
 
 Terminal 2 : un second nœud qui rejoint le premier (il rattrape la chaîne, puis reçoit chaque nouveau bloc).
@@ -47,20 +51,27 @@ Terminal 2 : un second nœud qui rejoint le premier (il rattrape la chaîne, pui
 python -m powchain node --port 5001 --peers 127.0.0.1:5000
 ```
 
-Terminal 3 : interroger un nœud, puis payer depuis la clé du mineur (la transaction voyage jusqu'au mineur, qui l'inclut dans un bloc).
+Terminal 3 : voir le solde des clés du wallet, puis payer depuis « mineur »
+vers une adresse (la transaction voyage jusqu'au mineur, qui l'inclut dans un bloc).
 
 ```bash
-python -m powchain status --node 127.0.0.1:5001 --address <adresse>
+python -m powchain wallet balance --node 127.0.0.1:5001
 ```
 
 ```bash
-python -m powchain send --node 127.0.0.1:5001 --seed-hex <graine de keygen> --to <adresse destinataire> --amount 2.5
+python -m powchain wallet send --node 127.0.0.1:5001 --from mineur --to <adresse à somme de contrôle> --amount 2.5
 ```
 
-`send` demande au nœud la prochaine séquence du compte, signe, envoie, puis
-affiche le solde projeté ; un refus (solde insuffisant, rejeu) est motivé.
-Un troisième nœud lancé avec `--peers 127.0.0.1:5001` découvrira le premier
-tout seul (échange d'adresses).
+`wallet send` déchiffre la clé le temps de signer (mot de passe demandé),
+demande au nœud la prochaine séquence, envoie, puis affiche le solde projeté ;
+un refus (solde insuffisant, rejeu, somme de contrôle d'adresse fausse) est
+motivé. L'adresse `--to` doit être recopiée sous la forme à somme de contrôle
+(majuscules comprises) affichée par `wallet address` / `wallet list` ; ajoutez
+`--unchecked` pour forcer une adresse en minuscules. Un troisième nœud lancé
+avec `--peers 127.0.0.1:5001` découvrira le premier tout seul.
+
+> `keygen` et `send --seed-hex` existent encore (dépannage) mais exposent la
+> graine privée : préférez le wallet.
 
 Chaque nœud écrit dans `data/node-<port>/` (changer avec `--data-dir`,
 désactiver avec `--memory`). Arrêtez-le (Ctrl+C, ou même brutalement) et
@@ -77,8 +88,8 @@ pow-blockchain/
 │   ├── errors.py            hiérarchie d'exceptions
 │   ├── crypto.py            SHA-256 (hashlib) et format des hashes
 │   ├── money.py             montants entiers (1 COIN = 10^8 unités), récompense et émission
-│   ├── keys.py              Ed25519 : KeyPair, verify_signature (SEUL module qui importe cryptography)
-│   ├── address.py           adresse = clé publique en hexadécimal
+│   ├── keys.py              Ed25519 + chiffrement (scrypt, AES-256-GCM) : SEUL module qui importe cryptography
+│   ├── address.py           adresse = clé publique en hexadécimal ; somme de contrôle d'affichage (EIP-55)
 │   ├── serialization.py     format canonique (le SEUL endroit qui définit les octets hashés)
 │   ├── proof_of_work.py     cible, difficulté, règle d'ajustement, travail
 │   ├── transaction.py       Transaction, hash, signature, coinbase, règles R1-R7
@@ -93,8 +104,9 @@ pow-blockchain/
 │   ├── network.py           NodeServer : sockets TCP asyncio + minage par tranches
 │   ├── simulation.py        SimulatedNetwork / FakeClock : plusieurs nœuds en mémoire, déterministe
 │   ├── storage.py           NodeStorage : dossier de données (blocks.jsonl, mempool.jsonl, peers.json)
-│   └── __main__.py          ligne de commande : node, keygen, status, send
-└── tests/                   336 tests unittest ; helpers.py = clés de test déterministes
+│   ├── wallet.py            Wallet : clés chiffrées dans wallet.json (compose keys.py, n'importe pas cryptography)
+│   └── __main__.py          ligne de commande : node, wallet, status ; keygen/send en legacy
+└── tests/                   368 tests unittest ; helpers.py = clés de test déterministes
 ```
 
 Chaque module ne dépend que de ceux situés au-dessus de lui dans cette liste.
@@ -277,6 +289,73 @@ chaîne valide passe la validation ; seul le réseau, par la règle du plus
 grand travail, remet ce nœud d'accord avec les autres). Le disque prouve
 l'intégrité de ce qu'il contient, pas que c'est la bonne chaîne.
 
+## Le wallet (Partie 7)
+
+Jusqu'ici la clé privée était un pis-aller : `keygen` l'affichait en clair et
+`send --seed-hex` la repassait en argument. Un wallet (`wallet.py`) garde une
+ou plusieurs clés dans un fichier `wallet.json`, **chiffrées**, et ne les
+déverrouille que le temps de signer.
+
+**Purement côté client et additif.** Le wallet ne touche ni au format des
+transactions, ni aux blocs, ni au Genesis : rien à re-figer. `wallet.py` ne
+fait que composer les primitives de `keys.py` — l'invariant « seul `keys.py`
+importe `cryptography` » tient toujours.
+
+### Chiffrement
+
+Un wallet a **un** mot de passe et **un** sel aléatoire. Le mot de passe et le
+sel donnent, par **scrypt** (fonction de dérivation coûteuse en mémoire : elle
+ralentit chaque essai d'attaque par dictionnaire), une clé maître de 32 octets.
+Chaque graine privée est chiffrée sous cette clé par **AES-256-GCM**, un
+chiffrement *authentifié* : au déchiffrement, un mot de passe erroné ou un
+octet modifié fait échouer la vérification du tag au lieu de rendre une graine
+fausse. L'adresse publique est liée au chiffré (donnée associée) : on ne peut
+pas recoller un chiffré sous une autre adresse.
+
+```
+wallet.json = { version, kdf: {name: scrypt, n, r, p, salt}, cipher: AES-256-GCM,
+                keys: [ {label, address, nonce, ciphertext}, ... ] }
+```
+
+Le fichier est écrit de façon atomique (tmp + `os.replace`), comme le stockage
+du nœud. Les paramètres scrypt sont stockés avec le sel : on pourra les
+durcir plus tard sans casser les anciens fichiers.
+
+### Somme de contrôle d'adresse
+
+L'adresse inscrite dans une transaction reste le hex brut de 64 caractères
+(c'est ce qui est signé). Mais du hex brut ne détecte aucune faute de frappe.
+Le wallet ajoute donc une **couche d'affichage** inspirée d'EIP-55 (adaptée à
+SHA-256) : mêmes 64 caractères, mais certains chiffres-lettres passent en
+**majuscule** selon un hash de l'adresse. La casse encode ainsi une somme de
+contrôle. `wallet send` exige la forme à casse mixte (celle qu'affichent
+`wallet address` / `wallet list`) et refuse une adresse dont la casse ne
+correspond pas, sauf `--unchecked`.
+
+### Commandes
+
+| Commande | Rôle | Mot de passe |
+|---|---|---|
+| `wallet create [--label NOM]` | crée le wallet et une première clé | demandé (deux fois) |
+| `wallet generate [--label NOM]` | ajoute une nouvelle clé aléatoire | demandé |
+| `wallet import --seed-hex H [--label NOM]` | ajoute une clé existante (sauvegarde) | demandé |
+| `wallet list` / `wallet address --label NOM` | adresses à somme de contrôle | non |
+| `wallet balance --node N [--label NOM]` | interroge un nœud | non |
+| `wallet send --from NOM --to ADRESSE --amount A` | signe et diffuse un paiement | demandé |
+| `wallet export --label NOM` | révèle la graine (pour la sauvegarder) | demandé |
+
+Le mot de passe est lu par `getpass` (jamais affiché, jamais dans `argv`) ; en
+contexte non interactif, la variable `POWCHAIN_WALLET_PASSWORD` sert
+d'échappatoire.
+
+**Ce que le wallet ne protège pas** (démo 9e) : un mot de passe *faible* reste
+cassable hors ligne (scrypt ralentit, n'empêche pas) ; un mot de passe *perdu*
+rend les fonds inaccessibles pour toujours — il n'y a aucune récupération, d'où
+`wallet export` pour sauvegarder la graine à part ; et la somme de contrôle
+attrape les fautes de frappe, pas l'envoi à une adresse valide mais qui
+n'appartient à personne. Le wallet protège la clé **au repos**, pas un poste
+déjà compromis (enregistreur de frappe).
+
 ## Règles de validation
 
 **Transaction** (`validate_transaction`, structurelles) :
@@ -334,16 +413,18 @@ fichier tronquée réparée ; corruption ailleurs refusée ; écritures atomique
 - Persistance : chaîne, mempool et carnet d'adresses survivent à un arrêt,
   même brutal ; fichier falsifié refusé, fin tronquée réparée, reconnexion
   automatique aux pairs connus (section 8 de `main.py`).
+- Wallet : clés chiffrées par mot de passe (scrypt + AES-256-GCM), somme de
+  contrôle d'adresse, paiements signés sans exposer la graine ; fichier
+  falsifié détecté au déverrouillage (section 9 de `main.py`, `wallet` en CLI).
 
 ## Ce qui n'est pas encore implémenté, et pourquoi plus tard
 
 | Fonctionnalité | Pourquoi elle attend |
 |---|---|
-| Wallet | Chiffrement des clés sur disque, suivi automatique des séquences, somme de contrôle des adresses. `send --seed-hex` est un pis-aller. |
 | Instantané de l'état | Le chargement rejoue toute la chaîne (O(n)). Un instantané périodique des soldes rendrait le démarrage immédiat, au prix d'un second format à garder cohérent avec les blocs. |
 | Frais de transaction | Sans frais, le mempool sert dans l'ordre d'arrivée ; les frais donneraient au mineur une raison d'inclure une transaction plutôt qu'une autre et protégeraient le réseau du spam. |
 | Reconnexion, bannissement | Un pair perdu n'est pas rappelé ; un pair fautif est déconnecté mais peut revenir. Il manque un score de mauvaise conduite et une liste noire temporaire. |
 | Synchronisation par en-têtes | Un fork profond se cherche par recul géométrique et la branche est revalidée entièrement ; Bitcoin échange d'abord des en-têtes (block locator). Acceptable tant que les chaînes sont courtes. |
 | Logique des packs de jeu | Le champ `data` et le modèle de comptes sont prêts ; un pack sera un enregistrement attaché à un compte. |
 | Attaque majoritaire | Limite intrinsèque de la preuve de travail : qui contrôle la majorité de la puissance de calcul peut réécrire l'historique (démo 6g). La parade est le nombre de confirmations, pas le code. |
-| Sécurité de la clé privée | Limite intrinsèque : une clé volée permet de signer au nom de son propriétaire, dans la limite de son solde. |
+| Sécurité de la clé privée | Le wallet chiffre la clé au repos, mais c'est une limite intrinsèque : une clé volée déchiffrée (ou un mot de passe capté) permet de signer au nom de son propriétaire, dans la limite de son solde. |

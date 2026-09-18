@@ -15,7 +15,9 @@ Hiérarchie :
     ├── CodecError                un dictionnaire JSON ne décrit pas une Transaction / un Block
     ├── ProtocolError             un message réseau est mal formé (type inconnu, champ manquant,
     │                             taille excessive...)
-    └── StorageError              le dossier de données est illisible, corrompu ou inscriptible
+    ├── StorageError              le dossier de données est illisible, corrompu ou inscriptible
+    └── WalletError               le fichier de wallet est illisible, corrompu, ou le mot de
+                                  passe est erroné
 
 Chaque exception porte un message explicite décrivant la règle violée :
 les fonctions is_valid_*() les convertissent en booléen, les fonctions
@@ -79,3 +81,14 @@ class ProtocolError(PowChainError):
 
 class StorageError(PowChainError):
     """Le dossier de données ne peut pas être lu (fichier corrompu, chaîne invalide) ou écrit."""
+
+
+class WalletError(PowChainError):
+    """Le fichier de wallet ne peut pas être lu, déchiffré ou modifié.
+
+    Couvre le fichier absent, mal formé ou corrompu, le mot de passe erroné,
+    l'étiquette (label) en double ou introuvable et l'adresse mal formée.
+    Le déchiffrement d'une graine avec un mauvais mot de passe échoue toujours
+    proprement (AES-GCM vérifie un tag d'authentification) : jamais de graine
+    fausse rendue silencieusement.
+    """
