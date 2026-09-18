@@ -59,7 +59,7 @@ from .protocol import PROTOCOL_VERSION, format_address
 from .transaction import Transaction
 
 API_VERSION = 1
-API_PORT_OFFSET = 1000  # port de l'API par défaut = port P2P + 1000 (5000 -> 6000)
+API_PORT_OFFSET = 3000  # port de l'API par défaut = port P2P + 3000 (5000 -> 8000) ; 8000 évite les ports bloqués par les navigateurs (6000 = X11)
 MAX_REQUEST_LINE_BYTES = 8 * 1024
 MAX_HEADER_BYTES = 16 * 1024
 MAX_BODY_BYTES = 1024 * 1024
