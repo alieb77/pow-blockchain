@@ -1,9 +1,9 @@
-# powchain — Parties 1 à 8 : hashes, preuve de travail, signatures, soldes, mempool, réseau P2P, disque, wallet, minage vers wallet
+# powchain — Parties 1 à 9 : hashes, preuve de travail, signatures, soldes, mempool, réseau P2P, disque, wallet, minage vers wallet, ouverture au réseau
 
 Blockchain Proof of Work construite pas à pas en Python (3.10 ou plus récent).
 Une seule dépendance externe, `cryptography`, pour les signatures Ed25519 **et**
 le chiffrement du wallet (scrypt + AES-256-GCM). Le réseau et le stockage
-n'utilisent que la bibliothèque standard (`asyncio`, `json`).
+n'utilisent que la bibliothèque standard (`asyncio`, `json`, `ipaddress`).
 
 > Depuis la Partie 5, plusieurs nœuds peuvent tourner dans plusieurs
 > terminaux (ou machines d'un même réseau local), s'échanger transactions et
@@ -14,8 +14,12 @@ n'utilisent que la bibliothèque standard (`asyncio`, `json`).
 > de passe et protège les adresses par une somme de contrôle : la graine
 > privée ne transite plus en clair. Depuis la Partie 8, un nœud mine
 > directement vers une clé du wallet (`node --mine-label`), sans mot de passe :
-> les coins s'empilent dans le wallet en une commande. Les frais, l'ouverture
-> au réseau et les packs de jeu viendront ensuite.
+> les coins s'empilent dans le wallet en une commande. Depuis la Partie 9, un
+> nœud s'ouvre au réseau local ou à Internet (`node --public`) : il n'annonce à
+> chaque pair que les adresses qui ont un sens pour lui, apprend sa propre
+> adresse, plafonne ses connexions entrantes et ferme les connexions muettes.
+> Les frais, la résilience (reconnexion, bannissement) et les packs de jeu
+> viendront ensuite.
 
 ## Installer et lancer
 
@@ -87,11 +91,49 @@ désactiver avec `--memory`). Arrêtez-le (Ctrl+C, ou même brutalement) et
 relancez-le **sans** `--peers` : il recharge sa chaîne, revalide tout, reprend
 ses transactions en attente et se reconnecte aux adresses qu'il connaissait.
 
+### Ouvrir au réseau (deux machines)
+
+Par défaut un nœud n'écoute que sur `127.0.0.1` : seule sa machine peut le
+joindre. Sur la machine qui doit être joignable, ajoutez `--public` : le nœud
+écoute sur toutes les interfaces et affiche au démarrage l'adresse à donner
+aux autres (par exemple `192.168.1.9:5000`).
+
+```bash
+python -m powchain node --port 5000 --public --mine-label mineur
+```
+
+Sur un autre poste du même réseau local, amorcez avec cette adresse (le second
+nœud n'a pas besoin d'être `--public` pour participer : il ouvre la connexion) :
+
+```bash
+python -m powchain node --port 5000 --peers 192.168.1.9:5000
+```
+
+Les clients aussi traversent le réseau : `wallet balance --node 192.168.1.9:5000`
+ou `status --node 192.168.1.9:5000` interrogent le nœud public depuis n'importe
+quel poste.
+
+Si l'autre poste n'arrive pas à se connecter, c'est presque toujours le
+pare-feu de Windows, qui bloque les connexions entrantes vers Python. Une
+règle suffit (invite de commandes **administrateur**, port à adapter) :
+
+```bash
+netsh advfirewall firewall add rule name="powchain 5000" dir=in action=allow protocol=TCP localport=5000
+```
+
+Pour être joignable **depuis Internet**, il faut en plus rediriger le port TCP
+5000 de la box vers cette machine (« NAT », « redirection de port », « virtual
+server » selon les box) et donner aux autres l'adresse IP publique de la box.
+Sans redirection, un nœud derrière une box peut appeler les autres mais
+personne ne peut l'appeler : il participe quand même (il reçoit blocs et
+transactions par les connexions qu'il a ouvertes), mais il n'aide pas les
+nouveaux venus à entrer. Le nœud n'ouvre pas la box lui-même (pas d'UPnP).
+
 ## Arborescence
 
 ```
 pow-blockchain/
-├── main.py                  démonstration : clés, coinbase, mempool, attaques, émission, réseau P2P, disque
+├── main.py                  démonstration : clés, coinbase, mempool, attaques, émission, réseau P2P, disque, wallet, ouverture au réseau
 ├── requirements.txt         cryptography>=42
 ├── powchain/
 │   ├── errors.py            hiérarchie d'exceptions
@@ -108,14 +150,14 @@ pow-blockchain/
 │   ├── mempool.py           Mempool : file d'attente validée contre l'état projeté (M1-M4), resync
 │   ├── chain.py             Blockchain (blocs + état + index par hash), validate_chain, chain_work
 │   ├── codec.py             Transaction / Block <-> dictionnaires JSON (réseau et disque)
-│   ├── protocol.py          catalogue des messages, enveloppe JSON, une ligne par message
-│   ├── node.py              Node : logique P2P PURE (gossip, synchronisation, forks, règle N1)
-│   ├── network.py           NodeServer : sockets TCP asyncio + minage par tranches
+│   ├── protocol.py          catalogue des messages, enveloppe JSON, une ligne par message ; portée des adresses
+│   ├── node.py              Node : logique P2P PURE (gossip, synchronisation, forks, règle N1, portées, plafond d'entrées)
+│   ├── network.py           NodeServer : sockets TCP asyncio + minage par tranches ; délai de hello, adresses IP locales
 │   ├── simulation.py        SimulatedNetwork / FakeClock : plusieurs nœuds en mémoire, déterministe
 │   ├── storage.py           NodeStorage : dossier de données (blocks.jsonl, mempool.jsonl, peers.json)
 │   ├── wallet.py            Wallet : clés chiffrées dans wallet.json (compose keys.py, n'importe pas cryptography)
-│   └── __main__.py          ligne de commande : node (--mine-label), wallet, status ; keygen/send en legacy
-└── tests/                   380 tests unittest ; helpers.py = clés de test déterministes
+│   └── __main__.py          ligne de commande : node (--public, --mine-label), wallet, status ; keygen/send en legacy
+└── tests/                   413 tests unittest ; helpers.py = clés de test déterministes
 ```
 
 Chaque module ne dépend que de ceux situés au-dessus de lui dans cette liste.
@@ -123,7 +165,7 @@ Chaque module ne dépend que de ceux situés au-dessus de lui dans cette liste.
 des actions (`Send`, `Connect`, `Disconnect`) que `network.py` (vraies
 sockets) ou `simulation.py` (en mémoire) exécutent, et il signale ses
 changements durables par des événements (`BlockAdded`, `ChainReorganized`,
-`TransactionAdded`, `AddressLearned`) auxquels `storage.py` s'abonne. C'est ce
+`TransactionAdded`, `AddressLearned`, `AddressForgotten`) auxquels `storage.py` s'abonne. C'est ce
 qui permet de tester forks, réorganisations et persistance de façon déterministe.
 
 ## Conventions (à connaître avant d'écrire du code)
@@ -143,7 +185,8 @@ qui permet de tester forks, réorganisations et persistance de façon détermini
 | Difficulté | entier `>= 1` stocké dans l'en-tête et hashé ; cible `= (2^256 - 1) // difficulté` |
 | Genesis | `index 0`, `timestamp 1767225600`, aucune transaction (donc aucune pièce), `difficulty 4096`, `nonce 5237`, hash `000cb9d4…facd` figé par un test |
 | Message réseau | un objet JSON `{"type", "payload"}` par ligne, 16 Mio max ; `PROTOCOL_VERSION = 1` |
-| Adresse réseau | `hôte:port` ; un nœud écoute sur `--port`, un client éphémère annonce `listen_port: null` |
+| Adresse réseau | `hôte:port` ; un nœud écoute sur `--port` (`127.0.0.1` par défaut, toutes les interfaces avec `--public`), un client éphémère annonce `listen_port: null` |
+| Portée d'un hôte | `loopback` (127.x, `localhost`, `::1`, `0.0.0.0`) < `private` (toute adresse non routable sur Internet : 10/8, 172.16/12, 192.168/16, lien local…) < `public` (le reste, et les noms d'hôte) ; une adresse n'est annoncée qu'à un pair au moins aussi proche que sa portée |
 | Dossier de données | `data/node-<port>/` : `blocks.jsonl` (un bloc par ligne, Genesis compris), `mempool.jsonl`, `peers.json` (`{"version": 1, "addresses": [...]}`) |
 
 ## Format canonique (ce qui est réellement hashé)
@@ -196,8 +239,10 @@ chain.state.balance_of(alice.address)      # 1_000_000_000 unités = 10 COIN
    Un `node_id` égal au nôtre (connexion à soi-même) ou déjà connecté (doublon),
    une version inconnue, ou tout message avant `hello` : connexion fermée.
 2. **Découverte.** Après `hello`, chaque nœud envoie les adresses qu'il connaît
-   (`peers`) ; le destinataire se connecte aux inconnues tant qu'il a moins de
-   `MAX_PEERS` (8) connexions. `--peers` ne sert donc qu'à amorcer.
+   (`peers`), en ne gardant que celles qui ont un sens pour ce pair (portée,
+   Partie 9) ; le destinataire se connecte aux inconnues tant qu'il a moins de
+   `MAX_PEERS` (8) connexions **sortantes** (les entrantes ont leur propre
+   plafond, `MAX_INBOUND` = 32). `--peers` ne sert donc qu'à amorcer.
 3. **Gossip des transactions.** `new_transaction` : admise dans le mempool
    (M1-M4) puis renvoyée à tous les autres pairs. Une transaction déjà connue
    n'est pas relayée : la rumeur s'éteint d'elle-même. Un refus vaut un
@@ -239,6 +284,43 @@ chain.state.balance_of(alice.address)      # 1_000_000_000 unités = 10 COIN
 - Un pair qui envoie un message hors protocole, un bloc invalide, un lot de
   blocs incohérent ou une chaîne sans ancêtre commun (Genesis différent) est
   déconnecté. Un pair dont la branche est simplement plus légère ne l'est pas.
+
+### Ouverture au réseau (Partie 9)
+
+Tout ce qui suit est de la logique pure dans `node.py` (testée sans socket),
+sauf le délai de hello qui vit dans `network.py`. Aucun changement de format :
+mêmes messages, même `PROTOCOL_VERSION`, mêmes blocs.
+
+- **Portée des adresses.** `127.0.0.1:5001` veut dire « cette machine » ;
+  envoyée à un pair d'une autre machine, elle désigne *sa* machine à lui.
+  `host_scope()` classe chaque hôte en `loopback` < `private` < `public`, et un
+  nœud **n'annonce une adresse qu'à un pair au moins aussi proche que sa
+  portée** : une adresse locale reste sur la machine, une adresse 192.168.x
+  reste sur le réseau local, une adresse publique va partout. En réception,
+  la règle est la même dans l'autre sens : une adresse plus locale que le pair
+  qui l'envoie est ignorée (comptée dans `stats["addresses_out_of_reach"]`).
+  Un pair est mémorisé sous l'adresse *vue de chez nous* (son IP source + son
+  `listen_port`) : un pair du réseau local est donc connu par son IP réseau.
+- **Adresse propre.** Un nœud ne connaît pas son adresse publique a priori.
+  Quand un pair lui renvoie une adresse qui est en fait la sienne, il l'appelle,
+  reçoit un `hello` portant son propre `node_id`, et en déduit : « cette adresse,
+  c'est moi ». Il la range dans `own_addresses`, la retire du carnet
+  (`AddressForgotten`, le fichier `peers.json` est réécrit), ne la rappelle
+  plus jamais et peut désormais l'annoncer aux pairs pour qui elle a un sens.
+- **Plafond d'entrées.** `MAX_INBOUND` (32) connexions entrantes au plus ; la
+  suivante est fermée avant même le `hello`. Les connexions **sortantes**
+  (`MAX_PEERS`, 8) se comptent à part : un pair qui remplit nos entrées ne nous
+  empêche pas de choisir nos sorties.
+- **Délai de hello.** Une connexion qui n'a rien dit au bout de
+  `HELLO_TIMEOUT_SECONDS` (10 s) est fermée : elle ne garde pas une entrée
+  occupée pour rien.
+- **Écoute.** `--public` = `0.0.0.0` (IPv4, toutes les interfaces) ; le nœud
+  affiche ses adresses réseau (`local_ip_addresses()`) au démarrage. Sans
+  `--public`, rien ne change par rapport aux parties précédentes.
+
+Ce que cette partie ne fait **pas** : rappeler un pair perdu, bannir un pair
+fautif, oublier une adresse injoignable (résilience, partie suivante), ni
+ouvrir la box (pas d'UPnP ni de traversée de NAT).
 
 ### Messages (`protocol.py`)
 
@@ -448,6 +530,12 @@ fichier tronquée réparée ; corruption ailleurs refusée ; écritures atomique
 - Minage vers son wallet : `node --mine-label` résout une clé du wallet en
   adresse publique (sans mot de passe) et empile les coinbases dedans ; dépenser
   demande toujours la clé privée (section 10 de `main.py`).
+- Ouverture au réseau : `node --public` écoute sur toutes les interfaces ;
+  portée des adresses (rien de local ne sort de la machine, rien de privé ne
+  sort du réseau local), adresse propre apprise par le `hello` à soi-même,
+  plafond de connexions entrantes distinct des sorties, connexions muettes
+  fermées ; vérifié sur de vraies sockets via l'IP réseau de la machine
+  (section 11 de `main.py`, `tests/test_open_network.py`).
 
 ## Ce qui n'est pas encore implémenté, et pourquoi plus tard
 
@@ -455,7 +543,8 @@ fichier tronquée réparée ; corruption ailleurs refusée ; écritures atomique
 |---|---|
 | Instantané de l'état | Le chargement rejoue toute la chaîne (O(n)). Un instantané périodique des soldes rendrait le démarrage immédiat, au prix d'un second format à garder cohérent avec les blocs. |
 | Frais de transaction | Sans frais, le mempool sert dans l'ordre d'arrivée ; les frais donneraient au mineur une raison d'inclure une transaction plutôt qu'une autre et protégeraient le réseau du spam. |
-| Reconnexion, bannissement | Un pair perdu n'est pas rappelé ; un pair fautif est déconnecté mais peut revenir. Il manque un score de mauvaise conduite et une liste noire temporaire. |
+| Reconnexion, bannissement | Un pair perdu n'est pas rappelé ; un pair fautif est déconnecté mais peut revenir ; une adresse injoignable reste dans le carnet. Il manque un rappel avec délai croissant, un score de mauvaise conduite et une liste noire temporaire. |
+| Traversée de NAT | Un nœud derrière une box n'est joignable que si le port est redirigé à la main ; sinon il reste un client sortant. Pas d'UPnP, pas de relais : hors périmètre d'une blockchain pédagogique. |
 | Synchronisation par en-têtes | Un fork profond se cherche par recul géométrique et la branche est revalidée entièrement ; Bitcoin échange d'abord des en-têtes (block locator). Acceptable tant que les chaînes sont courtes. |
 | Logique des packs de jeu | Le champ `data` et le modèle de comptes sont prêts ; un pack sera un enregistrement attaché à un compte. |
 | Attaque majoritaire | Limite intrinsèque de la preuve de travail : qui contrôle la majorité de la puissance de calcul peut réécrire l'historique (démo 6g). La parade est le nombre de confirmations, pas le code. |

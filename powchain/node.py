@@ -62,10 +62,24 @@ Ce qu'un nœud fait
   lève une exception (disque plein...) l'interrompt : c'est voulu, un nœud
   qui ne peut plus enregistrer ne doit pas continuer comme si de rien.
 
+* Ouverture au réseau (Partie 9) : chaque hôte a une PORTÉE (protocol.py :
+  boucle locale, réseau privé, Internet). Un nœud n'annonce une adresse qu'à
+  un pair pour qui elle a un sens (127.0.0.1 ne sort pas de la machine,
+  192.168.x ne sort pas du réseau local) et ignore, en réception, toute
+  adresse plus locale que le pair qui l'envoie : elle désigne SA machine ou
+  SON réseau, pas les nôtres. Un nœud qui tombe sur lui-même (hello portant
+  son propre node_id) apprend ainsi sa propre adresse : il la retire du
+  carnet, ne la rappelle plus et peut l'annoncer aux autres. Les connexions
+  ENTRANTES sont plafonnées (max_inbound) indépendamment des SORTANTES que le
+  nœud ouvre lui-même (max_peers) : remplir nos entrées ne nous empêche pas
+  de choisir nos sorties.
+
 Ce qu'un nœud ne fait pas (limites connues, voir README) : pas
 d'authentification des pairs, pas de score de mauvaise conduite ni de
-bannissement, pas de reconnexion automatique, et la règle du plus grand
-travail ne protège que si la majorité de la puissance de calcul est honnête.
+bannissement, pas de reconnexion automatique, pas de traversée de NAT (un
+nœud derrière une box n'est joignable que si son port est redirigé), et la
+règle du plus grand travail ne protège que si la majorité de la puissance de
+calcul est honnête.
 """
 
 import secrets
@@ -86,6 +100,7 @@ from .protocol import (
     GET_ACCOUNT,
     GET_BLOCKS,
     HELLO,
+    LOOPBACK,
     MAX_BLOCKS_PER_MESSAGE,
     MAX_PEERS_PER_MESSAGE,
     NEW_BLOCK,
@@ -95,6 +110,8 @@ from .protocol import (
     REJECT,
     Message,
     format_address,
+    host_reaches,
+    host_scope,
     message,
     parse_address,
     validate_message,
@@ -102,10 +119,11 @@ from .protocol import (
 from .transaction import Transaction
 
 MAX_FUTURE_DRIFT_SECONDS = 120  # règle N1 : 12 x TARGET_BLOCK_TIME, même ratio que Bitcoin (2 h / 10 min)
-MAX_PEERS = 8  # connexions simultanées (entrantes + sortantes) qu'un nœud accepte d'ouvrir lui-même
+MAX_PEERS = 8  # connexions SORTANTES qu'un nœud ouvre lui-même (--peers, découverte)
+MAX_INBOUND = 32  # connexions ENTRANTES acceptées en même temps (au-delà : fermées avant hello)
 MAX_KNOWN_ADDRESSES = 64  # carnet d'adresses pour la découverte
+MAX_OWN_ADDRESSES = 8  # adresses sous lesquelles le nœud s'est reconnu (hello portant son node_id)
 MAX_SYNC_BLOCKS = 100_000  # blocs accumulés au plus pendant une synchronisation (garde-fou mémoire)
-LOCAL_HOSTS = frozenset({"127.0.0.1", "localhost", "::1"})
 
 
 @dataclass(frozen=True, slots=True)
@@ -157,7 +175,14 @@ class AddressLearned:
     address: str
 
 
-Event = BlockAdded | ChainReorganized | TransactionAdded | AddressLearned
+@dataclass(frozen=True, slots=True)
+class AddressForgotten:
+    """Une adresse a quitté le carnet : le nœud s'est reconnu derrière elle (c'était la sienne)."""
+
+    address: str
+
+
+Event = BlockAdded | ChainReorganized | TransactionAdded | AddressLearned | AddressForgotten
 
 
 @dataclass(slots=True)
@@ -210,6 +235,7 @@ class Node:
         chain: Blockchain | None = None,
         mempool: Mempool | None = None,
         max_peers: int = MAX_PEERS,
+        max_inbound: int = MAX_INBOUND,
         log: Callable[[str], None] | None = None,
     ) -> None:
         if miner_address is not None and not is_valid_address(miner_address):
@@ -222,10 +248,12 @@ class Node:
         self.stats: Counter[str] = Counter()
         self._clock = clock
         self._max_peers = max_peers
+        self._max_inbound = max_inbound
         self._log = log if log is not None else (lambda text: None)
         self._peers: dict[object, Peer] = {}
         self._syncs: dict[object, SyncState] = {}
         self._known_addresses: dict[str, None] = {}  # dict = ensemble ordonné
+        self._own_addresses: dict[str, None] = {}  # adresses sous lesquelles on s'est reconnu
         self._listeners: list[Callable[[Event], None]] = []
         self._handlers = {
             HELLO: self._on_hello,
@@ -264,8 +292,23 @@ class Node:
         return len(self._peers)
 
     @property
+    def inbound_connections(self) -> int:
+        """Connexions que d'autres ont ouvertes vers nous (plafonnées par max_inbound)."""
+        return sum(1 for peer in self._peers.values() if not peer.outbound)
+
+    @property
+    def outbound_connections(self) -> int:
+        """Connexions que nous avons ouvertes nous-mêmes (plafonnées par max_peers)."""
+        return sum(1 for peer in self._peers.values() if peer.outbound)
+
+    @property
     def known_addresses(self) -> tuple[str, ...]:
         return tuple(self._known_addresses)
+
+    @property
+    def own_addresses(self) -> tuple[str, ...]:
+        """Adresses sous lesquelles ce nœud s'est reconnu (un pair nous a renvoyés vers nous-mêmes)."""
+        return tuple(self._own_addresses)
 
     @property
     def syncing(self) -> bool:
@@ -300,8 +343,13 @@ class Node:
         """Nouvelle connexion (entrante ou sortante) : on se présente."""
         if peer_id in self._peers:
             raise ValueError(f"peer_id déjà utilisé : {peer_id!r}")
+        if not outbound and self.inbound_connections >= self._max_inbound:
+            # Plafond d'entrées : fermée avant même de se présenter, pour ne rien coûter de plus.
+            self.stats["inbound_refused"] += 1
+            self._log(f"connexion entrante de {host} refusée : déjà {self._max_inbound} connexion(s) entrante(s)")
+            return [Disconnect(peer_id, f"plus de {self._max_inbound} connexions entrantes")]
         self._peers[peer_id] = Peer(peer_id, host, outbound, dialed_address=address)
-        if address is not None:
+        if address is not None and address not in self._own_addresses:
             self._remember_address(address)
         return [Send(peer_id, self.hello())]
 
@@ -384,13 +432,19 @@ class Node:
     def _on_hello(self, peer: Peer, msg: Message) -> list[Action]:
         if msg["version"] != PROTOCOL_VERSION:
             return [Disconnect(peer.peer_id, f"version de protocole {msg['version']} non prise en charge")]
-        if msg["node_id"] == self.node_id:
-            return [Disconnect(peer.peer_id, "connexion à soi-même")]
-        if any(other.node_id == msg["node_id"] for other in self._peers.values() if other is not peer):
-            return [Disconnect(peer.peer_id, "déjà connecté à ce nœud")]
         listen_port = msg["listen_port"]
         if listen_port is not None and not 1 <= listen_port <= 65535:
             return [Disconnect(peer.peer_id, f"port d'écoute invalide : {listen_port}")]
+        if msg["node_id"] == self.node_id:
+            # C'est nous à l'autre bout : l'adresse par laquelle on s'est joint est donc la nôtre.
+            own = peer.dialed_address
+            if own is None and listen_port is not None:
+                own = format_address(peer.host, listen_port)
+            if own is not None:
+                self._learn_own_address(own)
+            return [Disconnect(peer.peer_id, "connexion à soi-même")]
+        if any(other.node_id == msg["node_id"] for other in self._peers.values() if other is not peer):
+            return [Disconnect(peer.peer_id, "déjà connecté à ce nœud")]
         peer.node_id = msg["node_id"]
         peer.listen_port = listen_port
         peer.height, peer.work, peer.tip_hash = msg["height"], msg["work"], msg["tip_hash"]
@@ -398,7 +452,12 @@ class Node:
             self._remember_address(peer.address)
         self._log(f"pair {peer.node_id[:8]} connecté ({'sortant' if peer.outbound else 'entrant'}) : hauteur {peer.height}, travail {peer.work}")
         actions: list[Action] = []
-        shareable = [address for address in self._known_addresses if address != peer.address]
+        # On n'annonce à ce pair que les adresses qui ont un sens depuis là où il est (portée).
+        shareable = [
+            address
+            for address in (*self._own_addresses, *self._known_addresses)
+            if address != peer.address and host_reaches(parse_address(address)[0], peer.host)
+        ]
         if shareable:
             actions.append(Send(peer.peer_id, message(PEERS, addresses=shareable[:MAX_PEERS_PER_MESSAGE])))
         if peer.work > self.work:
@@ -410,10 +469,14 @@ class Node:
         for raw in msg["addresses"]:
             host, port = parse_address(raw)  # ProtocolError => Disconnect via on_message
             address = format_address(host, port)
+            if not host_reaches(host, peer.host):
+                # Plus locale que le pair qui l'envoie : elle désigne SA machine ou SON réseau, pas les nôtres.
+                self.stats["addresses_out_of_reach"] += 1
+                continue
             if address in self._known_addresses or self._is_own_address(host, port):
                 continue
             self._remember_address(address)
-            if self.connections < self._max_peers:
+            if self.outbound_connections + len(actions) < self._max_peers:
                 actions.append(Connect(address))
         return actions
 
@@ -610,8 +673,21 @@ class Node:
         if is_new and notify:
             self._emit(AddressLearned(address))
 
+    def _learn_own_address(self, address: str) -> None:
+        """Un hello portait notre node_id : `address` est l'une de nos adresses, plus jamais à rappeler."""
+        if address not in self._own_addresses:
+            self._own_addresses[address] = None
+            while len(self._own_addresses) > MAX_OWN_ADDRESSES:
+                del self._own_addresses[next(iter(self._own_addresses))]
+            self._log(f"adresse propre apprise : {address} (un pair nous a renvoyés vers nous-mêmes)")
+        if address in self._known_addresses:
+            del self._known_addresses[address]
+            self._emit(AddressForgotten(address))
+
     def _is_own_address(self, host: str, port: int) -> bool:
-        return self.listen_port == port and host in LOCAL_HOSTS
+        if format_address(host, port) in self._own_addresses:
+            return True
+        return self.listen_port == port and host_scope(host) == LOOPBACK
 
     def _name(self, peer_id: object) -> str:
         peer = self._peers.get(peer_id)

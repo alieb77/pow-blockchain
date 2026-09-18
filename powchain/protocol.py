@@ -30,8 +30,19 @@ restent à la charge du nœud, qui ne fait jamais confiance au contenu.
 
 Limites : MAX_MESSAGE_BYTES borne une ligne (protection mémoire) ;
 MAX_BLOCKS_PER_MESSAGE borne un lot de blocs (d'où la pagination has_more).
+
+Portée des adresses (Partie 9)
+------------------------------
+Une adresse « hôte:port » n'a pas le même sens partout : 127.0.0.1 désigne
+« cette machine », 192.168.1.9 « cette machine du réseau local », une adresse
+publique la même machine depuis Internet entier. host_scope() classe un hôte
+en LOOPBACK, PRIVATE ou PUBLIC ; host_reaches() dit si une adresse a un sens
+pour un pair situé à tel hôte : un nœud n'annonce jamais 127.0.0.1 à un pair
+d'une autre machine, ni 192.168.x à un pair d'Internet, et ignore en
+réception ce qu'un pair lui envoie de plus local que lui.
 """
 
+import ipaddress
 import json
 from collections.abc import Mapping
 from dataclasses import dataclass, field
@@ -181,3 +192,36 @@ def parse_address(text: object) -> tuple[str, int]:
     if not host or not port_text.isdigit() or not 1 <= int(port_text) <= 65535:
         raise ProtocolError(f"adresse invalide : {text!r}")
     return host, int(port_text)
+
+
+# Portée d'un hôte : jusqu'où son adresse a un sens.
+LOOPBACK = "loopback"  # 127.x, ::1, localhost, 0.0.0.0 : cette machine seulement
+PRIVATE = "private"  # 10/8, 172.16/12, 192.168/16, lien local, et toute plage non routable sur Internet
+PUBLIC = "public"  # adresse routable sur Internet, ou nom d'hôte (supposé résoluble partout)
+_SCOPE_RANK = {LOOPBACK: 0, PRIVATE: 1, PUBLIC: 2}
+
+
+def host_scope(host: str) -> str:
+    """LOOPBACK, PRIVATE ou PUBLIC pour un hôte « hôte » (adresse IP ou nom)."""
+    if host == "localhost":
+        return LOOPBACK
+    try:
+        ip = ipaddress.ip_address(host)
+    except ValueError:
+        return PUBLIC  # un nom d'hôte : on suppose que tout le monde peut le résoudre
+    if ip.is_loopback or ip.is_unspecified:
+        return LOOPBACK
+    if not ip.is_global:
+        return PRIVATE  # privé, lien local, réservé, documentation... : ne sort pas sur Internet
+    return PUBLIC
+
+
+def host_reaches(host: str, peer_host: str) -> bool:
+    """Vrai si une adresse située à `host` a un sens pour un pair situé à `peer_host`.
+
+    Règle : une adresse ne se partage qu'avec un pair au moins aussi proche
+    que sa portée. 127.0.0.1 n'a de sens que pour un pair de la même machine ;
+    192.168.x que pour un pair de la même machine ou du même réseau local ;
+    une adresse publique en a pour tout le monde.
+    """
+    return _SCOPE_RANK[host_scope(host)] >= _SCOPE_RANK[host_scope(peer_host)]

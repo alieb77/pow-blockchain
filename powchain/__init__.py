@@ -15,6 +15,9 @@ Partie 7 : wallet (Wallet : clés chiffrées par mot de passe via scrypt +
 AES-256-GCM, somme de contrôle d'adresse façon EIP-55, sauvegarde par graine).
 Partie 8 : miner vers son wallet (CLI « node --mine-label » : le nœud résout
 une clé du wallet en adresse publique, sans mot de passe ni graine).
+Partie 9 : ouverture au réseau (CLI « node --public » : écoute sur toutes les
+interfaces ; portée des adresses, adresse propre apprise, plafond de
+connexions entrantes, délai de hello).
 
 Ce module ré-exporte l'API publique pour permettre d'écrire simplement :
 
@@ -74,10 +77,12 @@ from .keys import (
 )
 from .mempool import DEFAULT_MAX_SIZE, Mempool
 from .mining import MiningResult, mine_block
-from .network import NodeServer
+from .network import HELLO_TIMEOUT_SECONDS, NodeServer, local_ip_addresses
 from .node import (
     MAX_FUTURE_DRIFT_SECONDS,
+    MAX_INBOUND,
     MAX_PEERS,
+    AddressForgotten,
     AddressLearned,
     BlockAdded,
     ChainReorganized,
@@ -113,7 +118,18 @@ from .proof_of_work import (
     is_valid_difficulty,
     target_from_difficulty,
 )
-from .protocol import PROTOCOL_VERSION, Message, decode_message, encode_message, message
+from .protocol import (
+    LOOPBACK,
+    PRIVATE,
+    PROTOCOL_VERSION,
+    PUBLIC,
+    Message,
+    decode_message,
+    encode_message,
+    host_reaches,
+    host_scope,
+    message,
+)
 from .simulation import FakeClock, SimulatedNetwork
 from .state import Account, State
 from .storage import NodeStorage
@@ -133,7 +149,7 @@ from .transaction import (
 )
 from .wallet import DEFAULT_WALLET_PATH, Wallet, WalletEntry
 
-__version__ = "0.8.0"
+__version__ = "0.9.0"
 
 __all__ = [
     "ADDRESS_LENGTH",
@@ -150,6 +166,7 @@ __all__ = [
     "has_valid_checksum",
     "normalize_address",
     "to_checksummed_address",
+    "AddressForgotten",
     "AddressLearned",
     "BlockAdded",
     "ChainReorganized",
@@ -160,8 +177,13 @@ __all__ = [
     "CodecError",
     "Disconnect",
     "FakeClock",
+    "HELLO_TIMEOUT_SECONDS",
+    "LOOPBACK",
     "MAX_FUTURE_DRIFT_SECONDS",
+    "MAX_INBOUND",
     "MAX_PEERS",
+    "PRIVATE",
+    "PUBLIC",
     "Message",
     "Node",
     "NodeServer",
@@ -174,6 +196,9 @@ __all__ = [
     "block_to_dict",
     "decode_message",
     "encode_message",
+    "host_reaches",
+    "host_scope",
+    "local_ip_addresses",
     "message",
     "transaction_from_dict",
     "transaction_to_dict",

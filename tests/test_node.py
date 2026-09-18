@@ -167,7 +167,7 @@ class HandshakeTests(unittest.TestCase):
 class PeerExchangeTests(unittest.TestCase):
     def setUp(self):
         self.node = Node(node_id="me", listen_port=5000, max_peers=3)
-        self.node.on_connect(1, "h", False)
+        self.node.on_connect(1, "10.0.0.1", False)  # un pair du réseau local : il peut nous parler d'adresses 10.x
         self.node.on_message(1, Node(node_id="other", listen_port=6000).hello())
 
     def test_connects_to_unknown_addresses(self):
@@ -176,12 +176,12 @@ class PeerExchangeTests(unittest.TestCase):
         self.assertIn("10.0.0.5:5000", self.node.known_addresses)
 
     def test_ignores_known_and_own_addresses(self):
-        actions = self.node.on_message(1, message(PEERS, addresses=["h:6000", "127.0.0.1:5000", "localhost:5000"]))
+        actions = self.node.on_message(1, message(PEERS, addresses=["10.0.0.1:6000", "127.0.0.1:5000", "localhost:5000"]))
         self.assertEqual(actions, [])
 
     def test_respects_max_peers(self):
-        self.node.on_connect(2, "h", False)
-        self.node.on_connect(3, "h", False)
+        for peer_id in (2, 3, 4):  # max_peers compte les connexions SORTANTES (les entrantes ont leur propre plafond)
+            self.node.on_connect(peer_id, f"10.0.0.{peer_id}", True, f"10.0.0.{peer_id}:5000")
         actions = self.node.on_message(1, message(PEERS, addresses=["10.0.0.5:5000"]))
         self.assertEqual(actions, [])
         self.assertIn("10.0.0.5:5000", self.node.known_addresses)  # mémorisée quand même

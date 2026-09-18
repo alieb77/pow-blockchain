@@ -27,7 +27,8 @@ Principes
   refus.
 * Le nœud ne sait pas qu'un disque existe : NodeStorage s'inscrit comme
   auditeur (Node.add_listener) et réagit aux événements BlockAdded,
-  ChainReorganized, TransactionAdded, AddressLearned. Une erreur d'écriture
+  ChainReorganized, TransactionAdded, AddressLearned et AddressForgotten
+  (carnet réécrit quand une adresse entre ou en sort). Une erreur d'écriture
   remonte dans le nœud, qui s'arrête (network.py) : mieux vaut un nœud
   arrêté qu'un nœud qui croit avoir enregistré.
 
@@ -48,7 +49,7 @@ from .chain import Blockchain
 from .codec import block_from_dict, block_to_dict, transaction_from_dict, transaction_to_dict
 from .errors import CodecError, InvalidChainError, InvalidTransactionError, MempoolError, StorageError
 from .mempool import Mempool
-from .node import AddressLearned, BlockAdded, ChainReorganized, Event, Node, TransactionAdded
+from .node import AddressForgotten, AddressLearned, BlockAdded, ChainReorganized, Event, Node, TransactionAdded
 from .protocol import parse_address
 from .state import State
 from .transaction import Transaction
@@ -185,7 +186,7 @@ class NodeStorage:
             self.write_mempool(node.mempool.transactions)
         elif isinstance(event, TransactionAdded):
             self._append_line(self.mempool_path, transaction_to_dict(event.transaction))
-        elif isinstance(event, AddressLearned):
+        elif isinstance(event, (AddressLearned, AddressForgotten)):
             self.write_addresses(node.known_addresses)
 
     def append_block(self, block: Block) -> None:

@@ -1,4 +1,4 @@
-"""Démonstration des Parties 1 à 8 : hashes, PoW, signatures, soldes, mempool, réseau P2P, disque, wallet.
+"""Démonstration des Parties 1 à 9 : hashes, PoW, signatures, soldes, mempool, réseau P2P, disque, wallet, ouverture au réseau.
 
 Lancer depuis le dossier du projet :
 
@@ -11,7 +11,9 @@ vivre plusieurs nœuds : d'abord sur un réseau simulé et déterministe (forks,
 règle du plus grand travail, borne d'horloge, attaque majoritaire), puis sur
 de vraies sockets TCP locales, montre ce qu'un nœud écrit sur le disque et ce
 qu'il refuse d'y relire, un wallet qui chiffre ses clés et met une somme de
-contrôle sur les adresses, et enfin le minage vers une clé du wallet.
+contrôle sur les adresses, le minage vers une clé du wallet, et enfin ce qui
+change quand un nœud s'ouvre au réseau (portée des adresses, adresse propre,
+plafond d'entrées, délai de hello).
 """
 
 import asyncio
@@ -26,9 +28,11 @@ from powchain import (
     GENESIS_TIMESTAMP,
     HALVING_INTERVAL,
     MAX_FUTURE_DRIFT_SECONDS,
+    MAX_PEERS,
     TARGET_BLOCK_TIME,
     Block,
     Blockchain,
+    Connect,
     FakeClock,
     InvalidChainError,
     InvalidTransactionError,
@@ -38,6 +42,7 @@ from powchain import (
     Node,
     NodeServer,
     NodeStorage,
+    Send,
     SimulatedNetwork,
     State,
     StorageError,
@@ -51,6 +56,7 @@ from powchain import (
     create_signed_transaction,
     create_transaction,
     format_units,
+    host_scope,
     is_valid_chain,
     is_valid_transaction,
     message,
@@ -59,7 +65,7 @@ from powchain import (
     parse_coin_amount,
     validate_chain,
 )
-from powchain.protocol import NEW_BLOCK
+from powchain.protocol import NEW_BLOCK, PEERS
 
 RULE = "=" * 76
 
@@ -612,6 +618,87 @@ def demo_mine_to_wallet() -> None:
         print("     la clé privée reste chiffrée. Un nœud public qui mine pour toi ne peut pas toucher à ton solde.")
 
 
+# ----------------------------------------------------------------------------
+# Partie 9 : ouverture au réseau
+# ----------------------------------------------------------------------------
+
+
+def shared_addresses(actions) -> list[str]:
+    """Adresses du message « peers » contenu dans une liste d'actions ([] s'il n'y en a pas)."""
+    for action in actions:
+        if isinstance(action, Send) and action.message.type == PEERS:
+            return action.message["addresses"]
+    return []
+
+
+def demo_open_network() -> None:
+    print_title("11. Ouvrir au réseau : portée des adresses, adresse propre, plafond d'entrées, délai de hello")
+    node = Node(node_id="ouvert", listen_port=5000, max_inbound=4, log=lambda t: print(f"    [ouvert] {t}"))
+
+    print("\n[11a] Chaque hôte a une PORTÉE : jusqu'où son adresse a un sens.")
+    for host in ("127.0.0.1", "192.168.1.9", "8.8.8.8", "mon-serveur.example"):
+        print(f"    {host:<22} -> {host_scope(host)}")
+
+    print("\n[11b] Le nœud connaît trois adresses, une par portée. À chaque pair il n'annonce que celles qui ont un")
+    print("     sens depuis là où il est : 127.0.0.1 ne sort pas de la machine, 192.168.x pas du réseau local.")
+    node.remember_addresses(["127.0.0.1:5001", "192.168.1.20:5000", "8.8.8.8:5000"])
+    visitors = {1: ("même machine", "127.0.0.1"), 2: ("réseau local", "192.168.1.30"), 3: ("Internet", "1.1.1.1")}
+    for peer_id, (where, host) in visitors.items():
+        node.on_connect(peer_id, host, outbound=False)
+        actions = node.on_message(peer_id, Node(node_id=f"visiteur-{peer_id}", listen_port=None).hello())
+        print(f"    au pair « {where} » ({host:<13}) : {shared_addresses(actions)}")
+
+    print("\n[11c] En réception, même règle : une adresse plus locale que le pair qui l'envoie désigne SA machine ou")
+    print("     SON réseau. Le pair d'Internet annonce 127.0.0.1:6000, 10.0.0.7:5000 et 9.9.9.9:5000 :")
+    actions = node.on_message(3, message(PEERS, addresses=["127.0.0.1:6000", "10.0.0.7:5000", "9.9.9.9:5000"]))
+    print(f"    connexions ouvertes : {[a.address for a in actions if isinstance(a, Connect)]} ; "
+          f"adresses ignorées : {node.stats['addresses_out_of_reach']}")
+
+    print("\n[11d] Le pair du réseau local nous annonce 192.168.1.9:5000. On appelle... et on tombe sur nous-même")
+    print("     (le hello porte notre node_id) : cette adresse est la nôtre, on l'apprend et on cesse de la rappeler.")
+    (connect,) = node.on_message(2, message(PEERS, addresses=["192.168.1.9:5000"]))
+    node.on_connect(9, "192.168.1.9", outbound=True, address=connect.address)
+    (closed,) = node.on_message(9, node.hello())
+    node.on_disconnect(9)
+    again = node.on_message(2, message(PEERS, addresses=["192.168.1.9:5000"]))
+    print(f"    résultat : « {closed.reason} » ; adresses propres : {list(node.own_addresses)} ; "
+          f"encore dans le carnet : {'192.168.1.9:5000' in node.known_addresses} ; ré-annoncée -> {len(again)} appel")
+    node.on_connect(10, "192.168.1.31", outbound=False)
+    actions = node.on_message(10, Node(node_id="visiteur-10", listen_port=None).hello())
+    print(f"    et on l'annonce désormais aux pairs du réseau local : {shared_addresses(actions)}")
+
+    print("\n[11e] Plafond d'entrées (max_inbound = 4 ici, 32 par défaut) : une connexion entrante de trop est fermée")
+    print("     avant même le hello. Les sorties (max_peers = 8) se comptent à part : remplir nos entrées ne nous")
+    print("     empêche pas de choisir nos pairs.")
+    (refused,) = node.on_connect(11, "1.1.1.2", outbound=False)
+    print(f"    -> « {refused.reason} » ; entrées occupées : {node.inbound_connections}/4, "
+          f"sorties encore possibles : {MAX_PEERS - node.outbound_connections}/{MAX_PEERS}")
+
+    asyncio.run(demo_hello_timeout())
+
+    print("\n[11g] Limite honnête. Un port ouvert protège désormais la mémoire du nœud (plafond, délai) et la qualité")
+    print("     du carnet (portées), mais : derrière une box, personne n'entre sans redirection de port, le nœud")
+    print("     reste un simple client sortant ; un pair perdu n'est pas rappelé et un pair fautif peut revenir")
+    print("     (résilience : prochaine partie). Être joignable n'expose pas les fonds : tout le monde peut lire la")
+    print("     chaîne, personne ne peut la falsifier sans le travail majoritaire, ni dépenser sans la clé privée.")
+
+
+async def demo_hello_timeout() -> None:
+    print("\n[11f] Sur une vraie socket ouverte à tous (0.0.0.0), une connexion muette est fermée après hello_timeout")
+    print("     (10 s par défaut, 0,5 s ici) : elle ne garde pas une entrée occupée pour rien.")
+    server = NodeServer(Node(node_id="ouvert"), host="0.0.0.0", hello_timeout=0.5, log=lambda t: print(f"    [ouvert] {t}"))
+    await server.start()
+    reader, writer = await asyncio.open_connection("127.0.0.1", server.port)
+    first = await asyncio.wait_for(reader.readline(), timeout=5)
+    print(f"    le nœud se présente aussitôt ({first.decode().strip()[:52]}...) ; nous, on ne dit rien...")
+    end = await asyncio.wait_for(reader.readline(), timeout=5)
+    print(f"    ... et la connexion est fermée par le nœud : {end == b''} ; connexions restantes : {server.node.connections}")
+    writer.close()
+    await server.stop()
+    print("    Pour de vrai : python -m powchain node --port 5000 --public   puis, sur un autre poste,")
+    print("                   python -m powchain node --port 5000 --peers <adresse affichée>:5000")
+
+
 def main() -> None:
     wallets, names = demo_keys()
     chain, pool = demo_genesis_and_first_reward(wallets, names)
@@ -623,6 +710,7 @@ def main() -> None:
     demo_persistence(wallets, names)
     demo_wallet(wallets)
     demo_mine_to_wallet()
+    demo_open_network()
     print()
 
 

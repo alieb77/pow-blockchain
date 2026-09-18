@@ -26,9 +26,21 @@ Le timestamp du candidat est rafraîchi à chaque seconde : ainsi la
 difficulté du bloc reflète le temps réellement écoulé depuis le précédent,
 et la règle d'ajustement (proof_of_work.py) voit les blocs lents comme les
 blocs rapides.
+
+Ouverture au réseau (Partie 9)
+------------------------------
+Par défaut un nœud écoute sur 127.0.0.1 : seule sa machine peut le joindre.
+Avec host="0.0.0.0" il écoute sur toutes les interfaces et devient joignable
+depuis le réseau local, à l'adresse que donne local_ip_addresses(), ou depuis
+Internet si la box redirige le port vers cette machine. Un port ouvert reçoit
+aussi des connexions qui ne parlent jamais : sans hello au bout de
+hello_timeout secondes, la connexion est fermée pour ne pas garder une entrée
+occupée pour rien. Le plafond d'entrées (max_inbound) et la portée des
+adresses (ce qu'on annonce à qui) sont dans node.py, logique pure.
 """
 
 import asyncio
+import socket
 from collections.abc import Callable
 from dataclasses import dataclass, replace
 
@@ -36,9 +48,24 @@ from .address import is_valid_address
 from .errors import MiningLimitError, ProtocolError, StorageError
 from .mining import mine_block
 from .node import Connect, Disconnect, Node, Send
-from .protocol import MAX_MESSAGE_BYTES, decode_message, encode_message, format_address, parse_address
+from .protocol import LOOPBACK, MAX_MESSAGE_BYTES, decode_message, encode_message, format_address, host_scope, parse_address
 
 DEFAULT_MINING_CHUNK = 4096  # essais entre deux retours à la boucle réseau (quelques millisecondes)
+HELLO_TIMEOUT_SECONDS = 10.0  # une connexion qui ne s'est pas présentée au bout de ce délai est fermée
+ALL_INTERFACES = frozenset({"0.0.0.0", "", "::"})  # hôtes d'écoute « toutes les interfaces »
+
+
+def local_ip_addresses() -> list[str]:
+    """Adresses IP de cette machine hors boucle locale : ce qu'il faut donner aux autres pour nous joindre.
+
+    Repose sur la résolution du nom de la machine (stdlib uniquement) ; peut
+    être vide sur une machine sans réseau, ou incomplet avec plusieurs cartes.
+    """
+    try:
+        _, _, addresses = socket.gethostbyname_ex(socket.gethostname())
+    except OSError:
+        return []
+    return sorted({ip for ip in addresses if host_scope(ip) != LOOPBACK})
 
 
 @dataclass(slots=True)
@@ -61,12 +88,14 @@ class NodeServer:
         port: int = 0,
         *,
         mining_chunk: int = DEFAULT_MINING_CHUNK,
+        hello_timeout: float | None = HELLO_TIMEOUT_SECONDS,
         log: Callable[[str], None] | None = None,
     ) -> None:
         self.node = node
         self.host = host
         self.port = port  # 0 = port libre choisi par le système, connu après start()
         self.mining_chunk = mining_chunk
+        self.hello_timeout = hello_timeout  # None = attendre le hello indéfiniment
         self._log = log if log is not None else (lambda text: None)
         self._server: asyncio.base_events.Server | None = None
         self._connections: dict[int, Connection] = {}
@@ -93,7 +122,11 @@ class NodeServer:
         self._server = await asyncio.start_server(self._accept, self.host, self.port, limit=MAX_MESSAGE_BYTES)
         self.port = self._server.sockets[0].getsockname()[1]
         self.node.listen_port = self.port
-        self._log(f"nœud {self.node.node_id[:8]} à l'écoute sur {self.address}")
+        if self.host in ALL_INTERFACES:
+            lan = ", ".join(format_address(ip, self.port) for ip in local_ip_addresses()) or "aucune adresse réseau détectée"
+            self._log(f"nœud {self.node.node_id[:8]} à l'écoute sur toutes les interfaces, port {self.port} (réseau local : {lan})")
+        else:
+            self._log(f"nœud {self.node.node_id[:8]} à l'écoute sur {self.address}")
         if self.node.miner_address is not None:
             self.start_mining()
 
@@ -178,12 +211,21 @@ class NodeServer:
         peer_id = connection.peer_id
         try:
             await self._execute(self.node.on_connect(peer_id, host, outbound, connection.address))
+            awaiting_hello = True
             while peer_id in self._connections:
                 try:
-                    line = await connection.reader.readline()
+                    if awaiting_hello and self.hello_timeout is not None:
+                        # Le premier message doit être hello : une connexion muette ne garde pas sa place.
+                        line = await asyncio.wait_for(connection.reader.readline(), self.hello_timeout)
+                    else:
+                        line = await connection.reader.readline()
+                except asyncio.TimeoutError:
+                    self._log(f"pair {peer_id} : aucun hello en {self.hello_timeout:g} s, connexion fermée")
+                    break
                 except ValueError:  # ligne plus longue que MAX_MESSAGE_BYTES
                     self._log(f"pair {peer_id} : message trop volumineux, connexion fermée")
                     break
+                awaiting_hello = False
                 if not line:
                     break  # le pair a fermé
                 try:

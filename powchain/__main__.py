@@ -1,6 +1,6 @@
 """Ligne de commande : lancer un nœud, gérer un wallet, interroger ou payer.
 
-    python -m powchain node --port 5000 [--peers 127.0.0.1:5001,...]
+    python -m powchain node --port 5000 [--public | --host IP] [--peers 192.168.1.9:5000,...]
                             [--mine ADRESSE | --mine-label NOM [--wallet FICHIER]]
                             [--data-dir DOSSIER | --memory]
     python -m powchain status --node 127.0.0.1:5000 [--address ADRESSE]
@@ -20,6 +20,13 @@
 Un nœud persiste par défaut dans data/node-<port>/ (blocs, mempool, carnet
 d'adresses, voir storage.py) : relancé, il reprend sa chaîne et se reconnecte
 seul aux adresses connues. --memory désactive toute écriture.
+
+Par défaut un nœud n'écoute que sur 127.0.0.1 : seule sa machine peut le
+joindre. « --public » l'ouvre sur toutes les interfaces (0.0.0.0) : les autres
+postes du réseau local le joignent à l'adresse affichée au démarrage, et
+Internet aussi si la box redirige le port TCP vers cette machine. Un pair
+distant s'amorce alors avec --peers <adresse>:<port>. Voir README (« Ouvrir
+au réseau ») pour le pare-feu Windows et la redirection de port.
 
 « status », « send » et les commandes « wallet balance/send » sont des CLIENTS
 ÉPHÉMÈRES : ils ouvrent une connexion vers un nœud, se présentent (hello sans
@@ -48,7 +55,7 @@ from .address import has_valid_checksum, is_valid_address, normalize_address, to
 from .errors import PowChainError, WalletError
 from .keys import KeyPair
 from .money import format_units, parse_coin_amount
-from .network import NodeServer
+from .network import NodeServer, local_ip_addresses
 from .node import MAX_PEERS, Node
 from .protocol import (
     ACCOUNT,
@@ -60,6 +67,7 @@ from .protocol import (
     REJECT,
     decode_message,
     encode_message,
+    format_address,
     message,
     parse_address,
 )
@@ -99,6 +107,11 @@ def resolve_miner_address(args: argparse.Namespace) -> str | None:
     return args.mine
 
 
+def listen_host(args: argparse.Namespace) -> str:
+    """Interface d'écoute : toutes (0.0.0.0) avec --public, sinon --host (127.0.0.1 par défaut)."""
+    return "0.0.0.0" if getattr(args, "public", False) else args.host
+
+
 async def run_node(args: argparse.Namespace) -> None:
     miner_address = resolve_miner_address(args)
     if args.memory:
@@ -115,8 +128,16 @@ async def run_node(args: argparse.Namespace) -> None:
             + (f", {storage.repaired_lines} fin de fichier tronquée réparée" if storage.repaired_lines else "")
             + (f", {storage.dropped_transactions} transaction(s) périmée(s) écartée(s)" if storage.dropped_transactions else "")
         )
-    server = NodeServer(node, args.host, args.port, log=timestamped)
+    server = NodeServer(node, listen_host(args), args.port, log=timestamped)
     await server.start()
+    if args.public:
+        reachable = [format_address(ip, server.port) for ip in local_ip_addresses()]
+        timestamped(
+            "nœud PUBLIC : joignable depuis le réseau local sur "
+            + (", ".join(reachable) if reachable else "(aucune adresse réseau détectée)")
+            + f" ; depuis Internet si la box redirige le port TCP {server.port} vers cette machine"
+        )
+        timestamped("un autre poste n'arrive pas à se connecter ? autorisez Python dans le pare-feu (README, « Ouvrir au réseau »)")
     if miner_address:
         origin = f" (clé « {args.mine_label} » du wallet {args.wallet})" if args.mine_label else ""
         timestamped(f"minage vers {to_checksummed_address(miner_address)[:16]}...{origin}")
@@ -143,7 +164,8 @@ async def run_node(args: argparse.Namespace) -> None:
             except asyncio.TimeoutError:
                 timestamped(
                     f"hauteur {node.height}, travail {node.work}, difficulté {node.tip.difficulty}, "
-                    f"{len(node.peers)} pair(s), {len(node.mempool)} transaction(s) en attente"
+                    f"{len(node.peers)} pair(s) dont {sum(1 for peer in node.peers if not peer.outbound)} entrant(s), "
+                    f"{len(node.mempool)} transaction(s) en attente"
                     + (
                         f", {server.blocks_mined} bloc(s) miné(s) ici, "
                         f"solde du mineur {format_units(node.chain.state.balance_of(miner_address))}"
@@ -425,7 +447,11 @@ def build_parser() -> argparse.ArgumentParser:
     commands = parser.add_subparsers(dest="command", required=True)
 
     node = commands.add_parser("node", help="lancer un nœud (et miner si --mine / --mine-label)")
-    node.add_argument("--host", default="127.0.0.1")
+    listen = node.add_mutually_exclusive_group()
+    listen.add_argument("--host", default="127.0.0.1", metavar="IP",
+                        help="interface d'écoute (défaut : 127.0.0.1, cette machine seulement)")
+    listen.add_argument("--public", action="store_true",
+                        help="écouter sur toutes les interfaces (0.0.0.0) : joignable depuis le réseau local ou Internet")
     node.add_argument("--port", type=int, default=5000)
     node.add_argument("--peers", default="", help="adresses hôte:port séparées par des virgules")
     mine = node.add_mutually_exclusive_group()
