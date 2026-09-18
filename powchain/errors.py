@@ -13,8 +13,9 @@ Hiérarchie :
     │   └── MiningLimitError      la limite d'essais demandée a été atteinte
     ├── MempoolError              refus propre à la file d'attente (plein, doublon, coinbase)
     ├── CodecError                un dictionnaire JSON ne décrit pas une Transaction / un Block
-    └── ProtocolError             un message réseau est mal formé (type inconnu, champ manquant,
-                                  taille excessive...)
+    ├── ProtocolError             un message réseau est mal formé (type inconnu, champ manquant,
+    │                             taille excessive...)
+    └── StorageError              le dossier de données est illisible, corrompu ou inscriptible
 
 Chaque exception porte un message explicite décrivant la règle violée :
 les fonctions is_valid_*() les convertissent en booléen, les fonctions
@@ -74,3 +75,7 @@ class CodecError(PowChainError):
 
 class ProtocolError(PowChainError):
     """Un message réseau viole le protocole (enveloppe, type, champs, taille)."""
+
+
+class StorageError(PowChainError):
+    """Le dossier de données ne peut pas être lu (fichier corrompu, chaîne invalide) ou écrit."""

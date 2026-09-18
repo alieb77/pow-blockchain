@@ -170,6 +170,33 @@ class MiningControlTests(ServerFixture):
         self.assertEqual(b.node.chain.blocks[: b.node.height + 1], a.node.chain.blocks[: b.node.height + 1])
 
 
+class StorageFailureTests(ServerFixture):
+    async def test_storage_error_stops_the_server_loudly(self):
+        from powchain.errors import StorageError
+
+        a = await self.start("A", miner=MINER.address)
+
+        def failing_listener(event):
+            raise StorageError("disque plein (simulé)")
+
+        a.node.add_listener(failing_listener)
+        self.assertFalse(a.failed.is_set())
+        await asyncio.wait_for(a.failed.wait(), timeout=15)  # le premier bloc miné déclenche l'écriture
+        self.assertIn("disque plein", str(a.fatal_error))
+        self.assertFalse(a.mining)
+
+    async def test_storage_error_on_received_block_stops_the_server(self):
+        from powchain.errors import StorageError
+
+        a = await self.start("A", miner=MINER.address)
+        b = await self.start("B")
+        b.node.add_listener(lambda event: (_ for _ in ()).throw(StorageError("écriture impossible (simulé)")))
+        await b.connect(a.address)
+        await asyncio.wait_for(b.failed.wait(), timeout=15)
+        self.assertIn("écriture impossible", str(b.fatal_error))
+        self.assertTrue(await b.wait_until(lambda: b.node.connections == 0))
+
+
 class ClientRequestTests(ServerFixture):
     async def test_status_and_account_query(self):
         a = await self.start("A", miner=MINER.address)

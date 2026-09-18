@@ -55,6 +55,12 @@ Ce qu'un nœud fait
 * Minage : build_candidate() assemble un bloc sur la pointe courante avec
   les transactions du mempool ; submit_block() adopte et relaie un bloc
   miné localement, sauf si la pointe a changé entre-temps (bloc périmé).
+* Événements (Partie 6) : chaque changement durable est signalé aux
+  auditeurs inscrits par add_listener() : BlockAdded, ChainReorganized,
+  TransactionAdded, AddressLearned. C'est ainsi que storage.py écrit le
+  disque sans que le nœud ne sache qu'un disque existe. Un auditeur qui
+  lève une exception (disque plein...) l'interrompt : c'est voulu, un nœud
+  qui ne peut plus enregistrer ne doit pas continuer comme si de rien.
 
 Ce qu'un nœud ne fait pas (limites connues, voir README) : pas
 d'authentification des pairs, pas de score de mauvaise conduite ni de
@@ -120,6 +126,38 @@ class Disconnect:
 
 
 Action = Send | Connect | Disconnect
+
+
+@dataclass(frozen=True, slots=True)
+class BlockAdded:
+    """Un bloc a prolongé la pointe (miné ici, reçu d'un pair ou rattrapé)."""
+
+    block: Block
+
+
+@dataclass(frozen=True, slots=True)
+class ChainReorganized:
+    """La chaîne a été remplacée à partir de fork_index + 1 par `blocks` (branche plus lourde)."""
+
+    fork_index: int
+    blocks: tuple[Block, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class TransactionAdded:
+    """Une transaction a été admise dans le mempool (localement ou reçue d'un pair)."""
+
+    transaction: Transaction
+
+
+@dataclass(frozen=True, slots=True)
+class AddressLearned:
+    """Une nouvelle adresse « hôte:port » est entrée dans le carnet d'adresses."""
+
+    address: str
+
+
+Event = BlockAdded | ChainReorganized | TransactionAdded | AddressLearned
 
 
 @dataclass(slots=True)
@@ -188,6 +226,7 @@ class Node:
         self._peers: dict[object, Peer] = {}
         self._syncs: dict[object, SyncState] = {}
         self._known_addresses: dict[str, None] = {}  # dict = ensemble ordonné
+        self._listeners: list[Callable[[Event], None]] = []
         self._handlers = {
             HELLO: self._on_hello,
             PEERS: self._on_peers,
@@ -238,6 +277,19 @@ class Node:
     def now(self) -> int:
         """Heure locale du nœud en secondes Unix (injectable pour les tests)."""
         return int(self._clock())
+
+    def add_listener(self, listener: Callable[[Event], None]) -> None:
+        """Inscrit un auditeur appelé à chaque événement durable (voir Event)."""
+        self._listeners.append(listener)
+
+    def remember_addresses(self, addresses) -> None:
+        """Pré-remplit le carnet d'adresses (ex. rechargé depuis le disque), sans événement."""
+        for address in addresses:
+            self._remember_address(address, notify=False)
+
+    def _emit(self, event: Event) -> None:
+        for listener in self._listeners:
+            listener(event)
 
     def __repr__(self) -> str:
         return f"Node({self.node_id[:8]}, hauteur {self.height}, travail {self.work}, {len(self.peers)} pair(s))"
@@ -302,6 +354,7 @@ class Node:
             return []
         self.mempool.add(transaction, self.chain.state)
         self.stats["transactions_accepted"] += 1
+        self._emit(TransactionAdded(transaction))
         return self._broadcast(message(NEW_TRANSACTION, transaction=transaction_to_dict(transaction)))
 
     def build_candidate(self, coinbase_data: str = "") -> Block | None:
@@ -374,6 +427,7 @@ class Node:
             self.stats["transactions_rejected"] += 1
             return [Send(peer.peer_id, message(REJECT, hash=transaction.hash, reason=str(error)))]
         self.stats["transactions_accepted"] += 1
+        self._emit(TransactionAdded(transaction))
         self._log(f"transaction {transaction.hash[:12]}... reçue de {peer.node_id[:8]}, relayée")
         return self._broadcast(message(NEW_TRANSACTION, transaction=transaction_to_dict(transaction)), exclude=peer.peer_id)
 
@@ -464,6 +518,7 @@ class Node:
             return [Disconnect(origin, f"bloc invalide : {error}")]
         self.mempool.remove_confirmed(block, self.chain.state)
         self.stats["blocks_accepted"] += 1
+        self._emit(BlockAdded(block))
         source = "miné ici" if origin is None else f"reçu de {self._name(origin)}"
         self._log(f"bloc n°{block.index} {block.hash[:12]}... {source} : {len(block.transactions) - 1} transaction(s), difficulté {block.difficulty}")
         return self._broadcast(message(NEW_BLOCK, block=block_to_dict(block)), exclude=origin)
@@ -513,6 +568,7 @@ class Node:
                     return [Disconnect(peer.peer_id, f"bloc n°{block.index} invalide : {error}")]
                 self.mempool.remove_confirmed(block, self.chain.state)
                 self.stats["blocks_accepted"] += 1
+                self._emit(BlockAdded(block))
             self._log(f"rattrapage : {len(received)} bloc(s) de {self._name(peer.peer_id)}, hauteur {self.height}")
         else:
             # Fork : revalidation complète, puis remplacement de la chaîne.
@@ -527,6 +583,7 @@ class Node:
             dropped = self.mempool.resync(new_chain.state, returned)
             self.stats["reorganizations"] += 1
             self.stats["blocks_accepted"] += len(received)
+            self._emit(ChainReorganized(fork_index=first.index - 1, blocks=tuple(received)))
             self._log(
                 f"RÉORGANISATION : {len(abandoned)} bloc(s) abandonné(s) depuis le bloc n°{first.index}, "
                 f"{len(received)} adopté(s) de {self._name(peer.peer_id)} ; {len(returned)} transaction(s) "
@@ -544,11 +601,14 @@ class Node:
     def _broadcast(self, msg: Message, exclude: object | None = None) -> list[Action]:
         return [Send(peer.peer_id, msg) for peer in self.peers if peer.peer_id != exclude]
 
-    def _remember_address(self, address: str) -> None:
+    def _remember_address(self, address: str, notify: bool = True) -> None:
+        is_new = address not in self._known_addresses
         self._known_addresses.pop(address, None)
         self._known_addresses[address] = None
         while len(self._known_addresses) > MAX_KNOWN_ADDRESSES:
             del self._known_addresses[next(iter(self._known_addresses))]
+        if is_new and notify:
+            self._emit(AddressLearned(address))
 
     def _is_own_address(self, host: str, port: int) -> bool:
         return self.listen_port == port and host in LOCAL_HOSTS

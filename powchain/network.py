@@ -33,7 +33,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, replace
 
 from .address import is_valid_address
-from .errors import MiningLimitError, ProtocolError
+from .errors import MiningLimitError, ProtocolError, StorageError
 from .mining import mine_block
 from .node import Connect, Disconnect, Node, Send
 from .protocol import MAX_MESSAGE_BYTES, decode_message, encode_message, format_address, parse_address
@@ -75,6 +75,8 @@ class NodeServer:
         self._background: set[asyncio.Task] = set()
         self._mining_task: asyncio.Task | None = None
         self.blocks_mined = 0
+        self.fatal_error: StorageError | None = None
+        self.failed = asyncio.Event()  # levé si le nœud ne peut plus enregistrer sur disque
 
     # ------------------------------------------------------------ cycle de vie
 
@@ -192,9 +194,17 @@ class NodeServer:
                 await self._execute(self.node.on_message(peer_id, msg))
         except (ConnectionError, asyncio.IncompleteReadError, OSError):
             pass
+        except StorageError as error:
+            self._fail(error)
         finally:
             self._close(connection)
             self.node.on_disconnect(peer_id)
+
+    def _fail(self, error: StorageError) -> None:
+        """Le disque n'a pas pu être écrit : le nœud ne doit pas continuer, on le signale."""
+        self._log(f"ERREUR DE STOCKAGE : {error}")
+        self.fatal_error = error
+        self.failed.set()
 
     def _close(self, connection: Connection) -> None:
         if self._connections.pop(connection.peer_id, None) is None:
@@ -256,5 +266,9 @@ class NodeServer:
                         break  # candidat périmé : on repart sur la pointe / la seconde courante
                     continue
                 self.blocks_mined += 1
-                await self._execute(self.node.submit_block(result.block))
+                try:
+                    await self._execute(self.node.submit_block(result.block))
+                except StorageError as error:
+                    self._fail(error)
+                    return
                 break

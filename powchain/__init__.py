@@ -8,6 +8,9 @@ Partie 4 : état des comptes (soldes, séquences), coinbase et émission, mempoo
 Partie 5 : réseau pair-à-pair : codec JSON, protocole, nœud (gossip,
 synchronisation, règle du plus grand travail, borne d'horloge), transport
 asyncio, réseau simulé, ligne de commande (python -m powchain).
+Partie 6 : persistance sur disque (NodeStorage : blocs, mempool, carnet
+d'adresses ; revalidation complète au chargement, réparation d'une fin de
+fichier tronquée, écritures atomiques).
 
 Ce module ré-exporte l'API publique pour permettre d'écrire simplement :
 
@@ -45,6 +48,7 @@ from .errors import (
     PowChainError,
     ProtocolError,
     SerializationError,
+    StorageError,
     ValidationError,
 )
 from .keys import (
@@ -57,7 +61,19 @@ from .keys import (
 from .mempool import DEFAULT_MAX_SIZE, Mempool
 from .mining import MiningResult, mine_block
 from .network import NodeServer
-from .node import MAX_FUTURE_DRIFT_SECONDS, MAX_PEERS, Connect, Disconnect, Node, Peer, Send
+from .node import (
+    MAX_FUTURE_DRIFT_SECONDS,
+    MAX_PEERS,
+    AddressLearned,
+    BlockAdded,
+    ChainReorganized,
+    Connect,
+    Disconnect,
+    Node,
+    Peer,
+    Send,
+    TransactionAdded,
+)
 from .money import (
     COIN_SYMBOL,
     HALVING_INTERVAL,
@@ -86,6 +102,7 @@ from .proof_of_work import (
 from .protocol import PROTOCOL_VERSION, Message, decode_message, encode_message, message
 from .simulation import FakeClock, SimulatedNetwork
 from .state import Account, State
+from .storage import NodeStorage
 from .transaction import (
     COINBASE_ADDRESS,
     MAX_DATA_BYTES,
@@ -101,13 +118,19 @@ from .transaction import (
     verify_transaction_signature,
 )
 
-__version__ = "0.5.0"
+__version__ = "0.6.0"
 
 __all__ = [
     "ADDRESS_LENGTH",
     "ADJUSTMENT_DIVISOR",
     "COINBASE_ADDRESS",
     "COIN_SYMBOL",
+    "AddressLearned",
+    "BlockAdded",
+    "ChainReorganized",
+    "NodeStorage",
+    "StorageError",
+    "TransactionAdded",
     "Connect",
     "CodecError",
     "Disconnect",

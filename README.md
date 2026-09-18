@@ -1,14 +1,15 @@
-# powchain — Parties 1 à 5 : hashes, preuve de travail, signatures, soldes, mempool, réseau P2P
+# powchain — Parties 1 à 6 : hashes, preuve de travail, signatures, soldes, mempool, réseau P2P, disque
 
 Blockchain Proof of Work construite pas à pas en Python (3.10 ou plus récent).
 Une seule dépendance externe, `cryptography`, pour les signatures Ed25519.
-Le réseau n'utilise que la bibliothèque standard (`asyncio`, `json`).
+Le réseau et le stockage n'utilisent que la bibliothèque standard (`asyncio`, `json`).
 
 > Depuis la Partie 5, plusieurs nœuds peuvent tourner dans plusieurs
 > terminaux (ou machines d'un même réseau local), s'échanger transactions et
 > blocs, se rattraper et résoudre les forks par la règle du plus grand
-> travail cumulé. Le wallet, la persistance sur disque, les frais et les packs
-> de jeu viendront ensuite.
+> travail cumulé. Depuis la Partie 6, un nœud relancé reprend sa chaîne, son
+> mempool et ses pairs depuis son dossier de données, après revalidation
+> complète. Le wallet, les frais et les packs de jeu viendront ensuite.
 
 ## Installer et lancer
 
@@ -16,13 +17,13 @@ Le réseau n'utilise que la bibliothèque standard (`asyncio`, `json`).
 pip install -r requirements.txt
 ```
 
-Démonstration complète (Parties 1 à 5, dont un réseau simulé et de vraies sockets) :
+Démonstration complète (Parties 1 à 6 : réseau simulé, vraies sockets, disque) :
 
 ```bash
 python main.py
 ```
 
-Tests (310, environ 6 s ; une dizaine utilisent de vraies sockets locales) :
+Tests (336, environ 7 s ; une quinzaine utilisent de vraies sockets locales) :
 
 ```bash
 python -m unittest -v
@@ -61,11 +62,16 @@ affiche le solde projeté ; un refus (solde insuffisant, rejeu) est motivé.
 Un troisième nœud lancé avec `--peers 127.0.0.1:5001` découvrira le premier
 tout seul (échange d'adresses).
 
+Chaque nœud écrit dans `data/node-<port>/` (changer avec `--data-dir`,
+désactiver avec `--memory`). Arrêtez-le (Ctrl+C, ou même brutalement) et
+relancez-le **sans** `--peers` : il recharge sa chaîne, revalide tout, reprend
+ses transactions en attente et se reconnecte aux adresses qu'il connaissait.
+
 ## Arborescence
 
 ```
 pow-blockchain/
-├── main.py                  démonstration : clés, coinbase, mempool, attaques, émission, réseau P2P
+├── main.py                  démonstration : clés, coinbase, mempool, attaques, émission, réseau P2P, disque
 ├── requirements.txt         cryptography>=42
 ├── powchain/
 │   ├── errors.py            hiérarchie d'exceptions
@@ -81,20 +87,23 @@ pow-blockchain/
 │   ├── state.py             State immuable : soldes, séquences, règles S1-S3
 │   ├── mempool.py           Mempool : file d'attente validée contre l'état projeté (M1-M4), resync
 │   ├── chain.py             Blockchain (blocs + état + index par hash), validate_chain, chain_work
-│   ├── codec.py             Transaction / Block <-> dictionnaires JSON (transport et futur stockage)
+│   ├── codec.py             Transaction / Block <-> dictionnaires JSON (réseau et disque)
 │   ├── protocol.py          catalogue des messages, enveloppe JSON, une ligne par message
 │   ├── node.py              Node : logique P2P PURE (gossip, synchronisation, forks, règle N1)
 │   ├── network.py           NodeServer : sockets TCP asyncio + minage par tranches
 │   ├── simulation.py        SimulatedNetwork / FakeClock : plusieurs nœuds en mémoire, déterministe
+│   ├── storage.py           NodeStorage : dossier de données (blocks.jsonl, mempool.jsonl, peers.json)
 │   └── __main__.py          ligne de commande : node, keygen, status, send
-└── tests/                   310 tests unittest ; helpers.py = clés de test déterministes
+└── tests/                   336 tests unittest ; helpers.py = clés de test déterministes
 ```
 
 Chaque module ne dépend que de ceux situés au-dessus de lui dans cette liste.
-`node.py` ne touche jamais à une socket : il reçoit des messages et renvoie
+`node.py` ne touche ni socket ni disque : il reçoit des messages et renvoie
 des actions (`Send`, `Connect`, `Disconnect`) que `network.py` (vraies
-sockets) ou `simulation.py` (en mémoire) exécutent. C'est ce qui permet de
-tester les forks et les réorganisations de façon déterministe.
+sockets) ou `simulation.py` (en mémoire) exécutent, et il signale ses
+changements durables par des événements (`BlockAdded`, `ChainReorganized`,
+`TransactionAdded`, `AddressLearned`) auxquels `storage.py` s'abonne. C'est ce
+qui permet de tester forks, réorganisations et persistance de façon déterministe.
 
 ## Conventions (à connaître avant d'écrire du code)
 
@@ -114,6 +123,7 @@ tester les forks et les réorganisations de façon déterministe.
 | Genesis | `index 0`, `timestamp 1767225600`, aucune transaction (donc aucune pièce), `difficulty 4096`, `nonce 5237`, hash `000cb9d4…facd` figé par un test |
 | Message réseau | un objet JSON `{"type", "payload"}` par ligne, 16 Mio max ; `PROTOCOL_VERSION = 1` |
 | Adresse réseau | `hôte:port` ; un nœud écoute sur `--port`, un client éphémère annonce `listen_port: null` |
+| Dossier de données | `data/node-<port>/` : `blocks.jsonl` (un bloc par ligne, Genesis compris), `mempool.jsonl`, `peers.json` (`{"version": 1, "addresses": [...]}`) |
 
 ## Format canonique (ce qui est réellement hashé)
 
@@ -132,10 +142,9 @@ Ni le hash ni la signature d'une transaction n'entrent dans son propre hash.
 La signature est calculée **sur** le hash et couvre donc tout le contenu.
 
 Le format JSON de `codec.py` est distinct : il transporte l'objet **complet**
-(signature comprise, transactions d'un bloc incluses) et sert au réseau ; il
-servira aussi au stockage sur disque. Décoder n'est pas valider : un objet
-décodé passe ensuite par `validate_transaction` / `validate_block` comme
-n'importe quel autre.
+(signature comprise, transactions d'un bloc incluses) et sert au réseau comme
+au disque. Décoder n'est pas valider : un objet décodé passe ensuite par
+`validate_transaction` / `validate_block` comme n'importe quel autre.
 
 ## Cycle de vie complet (en local)
 
@@ -228,6 +237,46 @@ Un nœud ne fait aucune différence entre un pair et un client éphémère
 (`status`, `send`) : mêmes messages, mêmes règles, aucune confiance accordée
 au contenu reçu.
 
+## La persistance sur disque (Partie 6)
+
+Un nœud possède un dossier de données ; `NodeStorage` le lit au démarrage et
+l'écrit ensuite au fil des événements du nœud.
+
+| Fichier | Contenu | Quand il est écrit |
+|---|---|---|
+| `blocks.jsonl` | toute la chaîne, un bloc par ligne, Genesis compris | une ligne ajoutée (flush + `fsync`) à chaque bloc adopté, **avant** qu'il soit relayé ; réécrit entièrement lors d'une réorganisation |
+| `mempool.jsonl` | les transactions en attente | une ligne ajoutée à chaque admission ; réécrit après chaque bloc (purge) |
+| `peers.json` | le carnet d'adresses `hôte:port` | réécrit à chaque adresse apprise |
+
+Toute réécriture passe par un fichier temporaire puis `os.replace` (atomique) :
+le disque ne contient jamais une chaîne à moitié écrite.
+
+**Au chargement, on ne croit rien.** Chaque bloc relu est validé depuis le
+Genesis par `Blockchain.from_blocks` (hashes, preuve de travail, signatures,
+soldes) : un fichier modifié à la main est refusé avec la raison
+(`StorageError`), même si la falsification recalcule les hashes et re-mine le
+bloc (la signature manque toujours). Une transaction du mempool devenue
+invalide (confirmée entre-temps) est écartée. Une adresse mal formée dans
+`peers.json` est ignorée.
+
+**Réparation.** Si le programme a été coupé pendant une écriture, la dernière
+ligne peut être tronquée (pas de `\n` final ou JSON incomplet) : elle est
+ignorée, le fichier est réécrit proprement, et le bloc manquant reviendra par
+le réseau. Une ligne illisible **ailleurs** qu'à la fin est une corruption :
+refus.
+
+**Erreur d'écriture.** Une `StorageError` levée pendant l'enregistrement
+(disque plein, dossier disparu) remonte dans le nœud et arrête le serveur
+(`NodeServer.failed`, code de sortie 1) : mieux vaut un nœud arrêté qu'un
+nœud qui croit avoir enregistré.
+
+**Ce que le disque ne garantit pas** (démo 8e) : la *disponibilité* (un
+fichier supprimé est perdu ; le nœud repart du Genesis et se resynchronise
+auprès de ses pairs) et l'*authenticité* (un fichier remplacé par une autre
+chaîne valide passe la validation ; seul le réseau, par la règle du plus
+grand travail, remet ce nœud d'accord avec les autres). Le disque prouve
+l'intégrité de ce qu'il contient, pas que c'est la bonne chaîne.
+
 ## Règles de validation
 
 **Transaction** (`validate_transaction`, structurelles) :
@@ -267,6 +316,9 @@ contre le précédent ET appliqué à l'état. `compute_state` renvoie l'état f
 
 **Réseau** (`Node`) : N1 borne d'horloge ; consensus par travail cumulé.
 
+**Disque** (`NodeStorage`) : revalidation complète au chargement ; fin de
+fichier tronquée réparée ; corruption ailleurs refusée ; écritures atomiques.
+
 ## Ce qui est construit et fonctionne
 
 - Hash déterministe, clés Ed25519, signatures, minage avec ajustement de difficulté.
@@ -279,13 +331,16 @@ contre le précédent ET appliqué à l'état. `compute_state` renvoie l'état f
   travail cumulé avec réorganisation et retour des transactions au mempool,
   borne d'horloge, déconnexion des pairs fautifs (sections 6 et 7 de `main.py`,
   `python -m powchain`).
+- Persistance : chaîne, mempool et carnet d'adresses survivent à un arrêt,
+  même brutal ; fichier falsifié refusé, fin tronquée réparée, reconnexion
+  automatique aux pairs connus (section 8 de `main.py`).
 
 ## Ce qui n'est pas encore implémenté, et pourquoi plus tard
 
 | Fonctionnalité | Pourquoi elle attend |
 |---|---|
-| Persistance sur disque | La chaîne vit en mémoire ; le codec JSON est prêt, il reste à écrire/charger un fichier et à reprendre au redémarrage. |
 | Wallet | Chiffrement des clés sur disque, suivi automatique des séquences, somme de contrôle des adresses. `send --seed-hex` est un pis-aller. |
+| Instantané de l'état | Le chargement rejoue toute la chaîne (O(n)). Un instantané périodique des soldes rendrait le démarrage immédiat, au prix d'un second format à garder cohérent avec les blocs. |
 | Frais de transaction | Sans frais, le mempool sert dans l'ordre d'arrivée ; les frais donneraient au mineur une raison d'inclure une transaction plutôt qu'une autre et protégeraient le réseau du spam. |
 | Reconnexion, bannissement | Un pair perdu n'est pas rappelé ; un pair fautif est déconnecté mais peut revenir. Il manque un score de mauvaise conduite et une liste noire temporaire. |
 | Synchronisation par en-têtes | Un fork profond se cherche par recul géométrique et la branche est revalidée entièrement ; Bitcoin échange d'abord des en-têtes (block locator). Acceptable tant que les chaînes sont courtes. |

@@ -1,4 +1,4 @@
-"""Démonstration des Parties 1 à 5 : hashes, preuve de travail, signatures, soldes, mempool, réseau P2P.
+"""Démonstration des Parties 1 à 6 : hashes, preuve de travail, signatures, soldes, mempool, réseau P2P, disque.
 
 Lancer depuis le dossier du projet :
 
@@ -8,14 +8,18 @@ Le programme génère des clés, fait miner un premier bloc (création monétair
 fait circuler les pièces via le mempool, simule des attaques (rejeu,
 récompense gonflée, dépense au-delà du solde, double dépense), puis fait
 vivre plusieurs nœuds : d'abord sur un réseau simulé et déterministe (forks,
-règle du plus grand travail, borne d'horloge, attaque majoritaire), enfin sur
-de vraies sockets TCP locales.
+règle du plus grand travail, borne d'horloge, attaque majoritaire), puis sur
+de vraies sockets TCP locales, et enfin montre ce qu'un nœud écrit sur le
+disque et ce qu'il refuse d'y relire.
 """
 
 import asyncio
+import json
 import sys
+import tempfile
 from dataclasses import replace
 from datetime import datetime, timezone
+from pathlib import Path
 
 from powchain import (
     GENESIS_TIMESTAMP,
@@ -32,8 +36,10 @@ from powchain import (
     MempoolError,
     Node,
     NodeServer,
+    NodeStorage,
     SimulatedNetwork,
     State,
+    StorageError,
     Transaction,
     block_reward,
     block_to_dict,
@@ -396,6 +402,118 @@ async def demo_real_sockets(wallets: dict[str, KeyPair]) -> None:
     print("    Pour essayer entre terminaux : python -m powchain node --port 5000 --mine <adresse>  (voir README)")
 
 
+# ----------------------------------------------------------------------------
+# Partie 6 : persistance sur disque
+# ----------------------------------------------------------------------------
+
+
+def print_files(storage: NodeStorage) -> None:
+    for path in (storage.blocks_path, storage.mempool_path, storage.peers_path):
+        raw = path.read_bytes()
+        print(f"    {path.name:<14} {len(raw):>6} octets, {raw.count(b'\n'):>3} ligne(s)")
+
+
+def try_load(label: str, directory: Path, clock: FakeClock) -> Node | None:
+    try:
+        node = NodeStorage(directory).open_node(node_id=label, clock=clock)
+    except StorageError as error:
+        print(f"    chargement REFUSÉ : {error}")
+        return None
+    print(f"    chargement accepté : hauteur {node.height}, pointe {node.tip.hash[:10]}...")
+    return node
+
+
+def demo_persistence(wallets: dict[str, KeyPair], names: dict[str, str]) -> None:
+    print_title("8. Persistance sur disque : un dossier par nœud, revalidé à chaque chargement")
+    miner, alice, bob = wallets["miner"], wallets["alice"], wallets["bob"]
+    mallory = KeyPair.generate()
+    clock = FakeClock(GENESIS_TIMESTAMP + TARGET_BLOCK_TIME)
+
+    with tempfile.TemporaryDirectory() as tmp:
+        directory = Path(tmp) / "node-A"
+        net = SimulatedNetwork(clock)
+        storage = NodeStorage(directory)
+        a = net.add(storage.open_node(node_id="A", miner_address=miner.address, clock=clock))
+        b = net.add(Node(node_id="B", clock=clock))
+        net.connect("A", "B")
+
+        print("\n[8a] A écrit dans son dossier : il mine 3 blocs (le 2e paie alice), garde un paiement à bob en")
+        print("     attente et connaît l'adresse de B. Chaque bloc est écrit (flush + fsync) AVANT d'être relayé.")
+        clock.advance(TARGET_BLOCK_TIME)
+        net.mine("A")
+        net.run("A", a.submit_transaction(create_signed_transaction(miner, alice.address, parse_coin_amount("3"), sequence=0)))
+        clock.advance(TARGET_BLOCK_TIME)
+        net.mine("A")
+        clock.advance(TARGET_BLOCK_TIME)
+        net.mine("A")
+        pending = create_signed_transaction(miner, bob.address, parse_coin_amount("1"), sequence=1)
+        net.run("A", a.submit_transaction(pending))
+        print_files(storage)
+        first_line = storage.blocks_path.read_text(encoding="utf-8").splitlines()[1]
+        print(f"    blocks.jsonl, ligne 2 : {first_line[:96]}...")
+        good_copy = storage.blocks_path.read_bytes()
+
+        print("\n[8b] Redémarrage : un nouveau nœud est reconstruit depuis le dossier, sans réseau.")
+        restarted = NodeStorage(directory).open_node(node_id="A2", clock=clock)
+        print(f"    hauteur {restarted.height}, même pointe que A : {restarted.tip == a.tip}, mempool : {len(restarted.mempool)} "
+              f"(paiement à bob : {pending in restarted.mempool}), adresses connues : {restarted.known_addresses}")
+
+        print("\n[8c] Coupure pendant l'écriture : les 40 derniers octets de blocks.jsonl manquent (ligne tronquée).")
+        storage.blocks_path.write_bytes(good_copy[:-40])
+        repaired = NodeStorage(directory)
+        restarted = repaired.open_node(node_id="A3", clock=clock)
+        print(f"    chargement : hauteur {restarted.height} (le bloc n°3 était incomplet), "
+              f"{repaired.repaired_lines} fin de fichier réparée, fichier réécrit proprement")
+        net2 = SimulatedNetwork(clock)
+        net2.add(restarted)
+        net2.add(Node(node_id="B", chain=b.chain, clock=clock))
+        net2.connect("A3", "B")
+        print(f"    reconnecté à B : hauteur {restarted.height}, le bloc perdu est revenu par le réseau ; "
+              f"blocks.jsonl : {storage.blocks_path.read_bytes().count(b'\n')} lignes")
+
+        print("\n[8d] Falsification du fichier : le paiement à alice (bloc n°2) passe de 3 à 30 COIN.")
+        lines = good_copy.split(b"\n")
+        block2 = a.chain.block_at(2)
+        coinbase, payment = block2.transactions
+        forged = replace(block2, transactions=(coinbase, replace(payment, amount=parse_coin_amount("30"))))
+        lines[2] = json.dumps(block_to_dict(forged), separators=(",", ":")).encode("utf-8")
+        storage.blocks_path.write_bytes(b"\n".join(lines))
+        try_load("A4", directory, clock)
+        print("     Falsification soignée : hash de la transaction recalculé, bloc re-miné... mais sans la clé du mineur.")
+        unsigned = create_transaction(payment.sender, payment.recipient, parse_coin_amount("30"), payment.data, payment.sequence)
+        forged = mine_block(replace(block2, transactions=(coinbase, unsigned))).block
+        lines[2] = json.dumps(block_to_dict(forged), separators=(",", ":")).encode("utf-8")
+        storage.blocks_path.write_bytes(b"\n".join(lines))
+        try_load("A5", directory, clock)
+
+        print("\n[8e] Limite honnête. (1) Fichier supprimé : rien à valider, le nœud repart du Genesis ;")
+        print("     c'est le réseau qui lui rend sa chaîne. Le disque ne garantit pas la disponibilité.")
+        storage.blocks_path.unlink()
+        restarted = NodeStorage(directory).open_node(node_id="A6", clock=clock)
+        print(f"    après suppression : hauteur {restarted.height}", end="")
+        net3 = SimulatedNetwork(clock)
+        net3.add(restarted)
+        net3.add(Node(node_id="B", chain=b.chain, clock=clock))
+        net3.connect("A6", "B")
+        print(f" ; après reconnexion à B : hauteur {restarted.height}")
+        print("     (2) Fichier remplacé par une AUTRE chaîne, valide mais étrangère (2 blocs minés par mallory) :")
+        other = Blockchain()
+        timestamp = GENESIS_TIMESTAMP
+        for _ in range(2):
+            timestamp += TARGET_BLOCK_TIME
+            other.add_block(mine_block(create_block(other.last_block, [], mallory.address, timestamp=timestamp)).block)
+        NodeStorage(directory).write_blocks(other.blocks)
+        restarted = try_load("A7", directory, clock)
+        net4 = SimulatedNetwork(clock)
+        net4.add(restarted)
+        net4.add(Node(node_id="B", chain=b.chain, clock=clock))
+        net4.connect("A7", "B")
+        print(f"    le disque l'a acceptée (elle respecte toutes les règles) ; après reconnexion à B, réorganisations : "
+              f"{restarted.stats['reorganizations']}, hauteur {restarted.height}, pointe = celle de B : {restarted.tip == b.tip}")
+        print("    Le disque prouve l'INTÉGRITÉ de ce qu'il contient, pas son AUTHENTICITÉ : seul le réseau,")
+        print("    par la règle du plus grand travail, dit quelle chaîne valide est la bonne.")
+
+
 def main() -> None:
     wallets, names = demo_keys()
     chain, pool = demo_genesis_and_first_reward(wallets, names)
@@ -404,6 +522,7 @@ def main() -> None:
     demo_emission()
     demo_simulated_network(wallets, names)
     asyncio.run(demo_real_sockets(wallets))
+    demo_persistence(wallets, names)
     print()
 
 

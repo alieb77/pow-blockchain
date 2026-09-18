@@ -1,9 +1,14 @@
 """Ligne de commande : lancer un nœud, générer une clé, interroger ou payer.
 
     python -m powchain node --port 5000 [--peers 127.0.0.1:5001,...] [--mine ADRESSE]
+                            [--data-dir DOSSIER | --memory]
     python -m powchain keygen
     python -m powchain status --node 127.0.0.1:5000 [--address ADRESSE]
     python -m powchain send --node 127.0.0.1:5000 --seed-hex GRAINE --to ADRESSE --amount 1.5
+
+Un nœud persiste par défaut dans data/node-<port>/ (blocs, mempool, carnet
+d'adresses, voir storage.py) : relancé, il reprend sa chaîne et se reconnecte
+seul aux adresses connues. --memory désactive toute écriture.
 
 « status » et « send » sont des CLIENTS ÉPHÉMÈRES : ils ouvrent une connexion
 vers un nœud, se présentent (hello sans port d'écoute), envoient leur
@@ -25,7 +30,7 @@ from .errors import PowChainError
 from .keys import KeyPair
 from .money import format_units, parse_coin_amount
 from .network import NodeServer
-from .node import Node
+from .node import MAX_PEERS, Node
 from .protocol import (
     ACCOUNT,
     GET_ACCOUNT,
@@ -41,6 +46,7 @@ from .protocol import (
 )
 from .block import create_genesis_block
 from .codec import transaction_to_dict
+from .storage import NodeStorage
 from .transaction import create_signed_transaction
 
 STATUS_INTERVAL_SECONDS = 10
@@ -54,12 +60,25 @@ def timestamped(text: str) -> None:
 
 
 async def run_node(args: argparse.Namespace) -> None:
-    node = Node(miner_address=args.mine, log=timestamped)
+    if args.memory:
+        node = Node(miner_address=args.mine, log=timestamped)
+        timestamped("mode --memory : rien ne sera enregistré sur le disque")
+    else:
+        storage = NodeStorage(args.data_dir or f"data/node-{args.port}")
+        existed = storage.exists()
+        node = storage.open_node(miner_address=args.mine, log=timestamped)
+        timestamped(
+            f"dossier {storage.directory} : chaîne {'chargée' if existed else 'créée'}, hauteur {node.height}, "
+            f"travail {node.work}, {len(node.mempool)} transaction(s) en attente, "
+            f"{len(node.known_addresses)} adresse(s) connue(s)"
+            + (f", {storage.repaired_lines} fin de fichier tronquée réparée" if storage.repaired_lines else "")
+            + (f", {storage.dropped_transactions} transaction(s) périmée(s) écartée(s)" if storage.dropped_transactions else "")
+        )
     server = NodeServer(node, args.host, args.port, log=timestamped)
     await server.start()
     if args.mine:
         timestamped(f"minage activé pour {args.mine[:16]}...")
-    for address in args.peers:
+    for address in list(dict.fromkeys(args.peers + list(node.known_addresses)))[:MAX_PEERS]:
         await server.connect(address)
 
     stop = asyncio.Event()
@@ -70,6 +89,11 @@ async def run_node(args: argparse.Namespace) -> None:
         except (NotImplementedError, AttributeError, RuntimeError):
             pass  # Windows : Ctrl+C lève KeyboardInterrupt dans asyncio.run()
 
+    async def stop_on_failure() -> None:
+        await server.failed.wait()
+        stop.set()
+
+    watcher = asyncio.create_task(stop_on_failure())
     try:
         while not stop.is_set():
             try:
@@ -81,7 +105,11 @@ async def run_node(args: argparse.Namespace) -> None:
                     + (f", {server.blocks_mined} bloc(s) miné(s) ici" if args.mine else "")
                 )
     finally:
+        watcher.cancel()
         await server.stop()
+        if server.fatal_error is not None:
+            timestamped(f"nœud arrêté : {server.fatal_error}")
+            sys.exit(1)
         timestamped("nœud arrêté")
 
 
@@ -195,6 +223,8 @@ def build_parser() -> argparse.ArgumentParser:
     node.add_argument("--port", type=int, default=5000)
     node.add_argument("--peers", default="", help="adresses hôte:port séparées par des virgules")
     node.add_argument("--mine", type=address_argument, default=None, metavar="ADRESSE", help="miner pour cette adresse")
+    node.add_argument("--data-dir", default=None, metavar="DOSSIER", help="dossier de données (défaut : data/node-<port>)")
+    node.add_argument("--memory", action="store_true", help="ne rien enregistrer sur le disque")
 
     commands.add_parser("keygen", help="générer une paire de clés")
 
