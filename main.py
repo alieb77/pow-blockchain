@@ -1,4 +1,4 @@
-"""Démonstration des Parties 1 à 7 : hashes, PoW, signatures, soldes, mempool, réseau P2P, disque, wallet.
+"""Démonstration des Parties 1 à 8 : hashes, PoW, signatures, soldes, mempool, réseau P2P, disque, wallet.
 
 Lancer depuis le dossier du projet :
 
@@ -10,8 +10,8 @@ récompense gonflée, dépense au-delà du solde, double dépense), puis fait
 vivre plusieurs nœuds : d'abord sur un réseau simulé et déterministe (forks,
 règle du plus grand travail, borne d'horloge, attaque majoritaire), puis sur
 de vraies sockets TCP locales, montre ce qu'un nœud écrit sur le disque et ce
-qu'il refuse d'y relire, et enfin un wallet qui chiffre ses clés et met une
-somme de contrôle sur les adresses.
+qu'il refuse d'y relire, un wallet qui chiffre ses clés et met une somme de
+contrôle sur les adresses, et enfin le minage vers une clé du wallet.
 """
 
 import asyncio
@@ -583,6 +583,35 @@ def demo_wallet(wallets: dict[str, KeyPair]) -> None:
         print("     les fautes de frappe, pas l'envoi volontaire à une adresse valide qui n'est à personne.")
 
 
+# ----------------------------------------------------------------------------
+# Partie 8 : miner vers son wallet
+# ----------------------------------------------------------------------------
+
+
+def demo_mine_to_wallet() -> None:
+    print_title("10. Miner vers son wallet : le nœud lit l'adresse publique, sans mot de passe")
+    password = "corriger-cheval-pile-agrafe"
+    with tempfile.TemporaryDirectory() as tmp:
+        wallet = Wallet.create(Path(tmp) / "wallet.json")
+        wallet.generate_key(password, label="mineur")
+        wallet.save()
+
+        print("\n[10a] La CLI résout « node --mine-label mineur » en une adresse. Miner n'utilise que la clé")
+        print("     PUBLIQUE : lire l'adresse ne demande aucun mot de passe et ne touche jamais la graine chiffrée.")
+        address = wallet.address_of("mineur")  # aucun mot de passe requis
+        print(f"    adresse de minage : {wallet.checksummed_address_of('mineur')}")
+
+        print("\n[10b] Le nœud mine : chaque coinbase paie cette adresse ; les coins s'empilent dans le wallet.")
+        chain = Blockchain()
+        for _ in range(2):
+            chain.add_block(mine_block(create_block(chain.last_block, [], address)).block)
+        print(f"    2 blocs minés ; solde de « mineur » : {format_units(chain.state.balance_of(address))}")
+
+        print("\n[10c] Limite honnête. Miner vers une adresse n'expose aucun secret : le nœud n'a lu que la partie")
+        print("     publique du wallet. Mais DÉPENSER ces coins demande toujours le mot de passe (pour signer) —")
+        print("     la clé privée reste chiffrée. Un nœud public qui mine pour toi ne peut pas toucher à ton solde.")
+
+
 def main() -> None:
     wallets, names = demo_keys()
     chain, pool = demo_genesis_and_first_reward(wallets, names)
@@ -593,6 +622,7 @@ def main() -> None:
     asyncio.run(demo_real_sockets(wallets))
     demo_persistence(wallets, names)
     demo_wallet(wallets)
+    demo_mine_to_wallet()
     print()
 
 

@@ -1,6 +1,7 @@
 """Ligne de commande : lancer un nœud, gérer un wallet, interroger ou payer.
 
-    python -m powchain node --port 5000 [--peers 127.0.0.1:5001,...] [--mine ADRESSE]
+    python -m powchain node --port 5000 [--peers 127.0.0.1:5001,...]
+                            [--mine ADRESSE | --mine-label NOM [--wallet FICHIER]]
                             [--data-dir DOSSIER | --memory]
     python -m powchain status --node 127.0.0.1:5000 [--address ADRESSE]
 
@@ -43,7 +44,7 @@ import sys
 import time
 from pathlib import Path
 
-from .address import is_valid_address, normalize_address, to_checksummed_address
+from .address import has_valid_checksum, is_valid_address, normalize_address, to_checksummed_address
 from .errors import PowChainError, WalletError
 from .keys import KeyPair
 from .money import format_units, parse_coin_amount
@@ -79,14 +80,34 @@ def timestamped(text: str) -> None:
 # ----------------------------------------------------------------- node
 
 
+def resolve_miner_address(args: argparse.Namespace) -> str | None:
+    """Adresse vers laquelle miner : depuis --mine (adresse) ou --mine-label (clé du wallet).
+
+    Miner n'exige que la clé PUBLIQUE : on lit donc juste l'adresse du wallet,
+    sans mot de passe et sans jamais toucher à la graine chiffrée. Retourne
+    None si le nœud ne mine pas.
+    """
+    if getattr(args, "mine_label", None):
+        wallet = _load_wallet(args.wallet)
+        try:
+            return wallet.address_of(args.mine_label)
+        except WalletError:
+            available = ", ".join(wallet.labels) or "(aucune)"
+            raise WalletError(
+                f"aucune clé « {args.mine_label} » dans {args.wallet} ; clés disponibles : {available}"
+            ) from None
+    return args.mine
+
+
 async def run_node(args: argparse.Namespace) -> None:
+    miner_address = resolve_miner_address(args)
     if args.memory:
-        node = Node(miner_address=args.mine, log=timestamped)
+        node = Node(miner_address=miner_address, log=timestamped)
         timestamped("mode --memory : rien ne sera enregistré sur le disque")
     else:
         storage = NodeStorage(args.data_dir or f"data/node-{args.port}")
         existed = storage.exists()
-        node = storage.open_node(miner_address=args.mine, log=timestamped)
+        node = storage.open_node(miner_address=miner_address, log=timestamped)
         timestamped(
             f"dossier {storage.directory} : chaîne {'chargée' if existed else 'créée'}, hauteur {node.height}, "
             f"travail {node.work}, {len(node.mempool)} transaction(s) en attente, "
@@ -96,8 +117,9 @@ async def run_node(args: argparse.Namespace) -> None:
         )
     server = NodeServer(node, args.host, args.port, log=timestamped)
     await server.start()
-    if args.mine:
-        timestamped(f"minage activé pour {args.mine[:16]}...")
+    if miner_address:
+        origin = f" (clé « {args.mine_label} » du wallet {args.wallet})" if args.mine_label else ""
+        timestamped(f"minage vers {to_checksummed_address(miner_address)[:16]}...{origin}")
     for address in list(dict.fromkeys(args.peers + list(node.known_addresses)))[:MAX_PEERS]:
         await server.connect(address)
 
@@ -122,7 +144,12 @@ async def run_node(args: argparse.Namespace) -> None:
                 timestamped(
                     f"hauteur {node.height}, travail {node.work}, difficulté {node.tip.difficulty}, "
                     f"{len(node.peers)} pair(s), {len(node.mempool)} transaction(s) en attente"
-                    + (f", {server.blocks_mined} bloc(s) miné(s) ici" if args.mine else "")
+                    + (
+                        f", {server.blocks_mined} bloc(s) miné(s) ici, "
+                        f"solde du mineur {format_units(node.chain.state.balance_of(miner_address))}"
+                        if miner_address
+                        else ""
+                    )
                 )
     finally:
         watcher.cancel()
@@ -382,15 +409,32 @@ def address_argument(value: str) -> str:
     return value
 
 
+def mine_address_argument(value: str) -> str:
+    """Adresse de minage : accepte le hex brut minuscule OU la forme à somme de contrôle du wallet."""
+    if is_valid_address(value):
+        return value
+    if has_valid_checksum(value):
+        return value.lower()
+    raise argparse.ArgumentTypeError(
+        "adresse invalide : 64 caractères hexadécimaux, ou la forme à somme de contrôle affichée par le wallet"
+    )
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="python -m powchain", description="powchain : nœud, clés, paiements.")
     commands = parser.add_subparsers(dest="command", required=True)
 
-    node = commands.add_parser("node", help="lancer un nœud (et miner si --mine)")
+    node = commands.add_parser("node", help="lancer un nœud (et miner si --mine / --mine-label)")
     node.add_argument("--host", default="127.0.0.1")
     node.add_argument("--port", type=int, default=5000)
     node.add_argument("--peers", default="", help="adresses hôte:port séparées par des virgules")
-    node.add_argument("--mine", type=address_argument, default=None, metavar="ADRESSE", help="miner pour cette adresse")
+    mine = node.add_mutually_exclusive_group()
+    mine.add_argument("--mine", type=mine_address_argument, default=None, metavar="ADRESSE",
+                      help="miner vers cette adresse (hex brut ou forme à somme de contrôle)")
+    mine.add_argument("--mine-label", default=None, metavar="NOM",
+                      help="miner vers la clé NOM du wallet (aucun mot de passe : seule l'adresse publique est lue)")
+    node.add_argument("--wallet", default=DEFAULT_WALLET_PATH, metavar="FICHIER",
+                      help="wallet où lire --mine-label (défaut : wallet.json)")
     node.add_argument("--data-dir", default=None, metavar="DOSSIER", help="dossier de données (défaut : data/node-<port>)")
     node.add_argument("--memory", action="store_true", help="ne rien enregistrer sur le disque")
 

@@ -13,6 +13,8 @@ d'adresses ; revalidation complète au chargement, réparation d'une fin de
 fichier tronquée, écritures atomiques).
 Partie 7 : wallet (Wallet : clés chiffrées par mot de passe via scrypt +
 AES-256-GCM, somme de contrôle d'adresse façon EIP-55, sauvegarde par graine).
+Partie 8 : miner vers son wallet (CLI « node --mine-label » : le nœud résout
+une clé du wallet en adresse publique, sans mot de passe ni graine).
 
 Ce module ré-exporte l'API publique pour permettre d'écrire simplement :
 
@@ -131,7 +133,7 @@ from .transaction import (
 )
 from .wallet import DEFAULT_WALLET_PATH, Wallet, WalletEntry
 
-__version__ = "0.7.0"
+__version__ = "0.8.0"
 
 __all__ = [
     "ADDRESS_LENGTH",

@@ -1,4 +1,4 @@
-# powchain — Parties 1 à 7 : hashes, preuve de travail, signatures, soldes, mempool, réseau P2P, disque, wallet
+# powchain — Parties 1 à 8 : hashes, preuve de travail, signatures, soldes, mempool, réseau P2P, disque, wallet, minage vers wallet
 
 Blockchain Proof of Work construite pas à pas en Python (3.10 ou plus récent).
 Une seule dépendance externe, `cryptography`, pour les signatures Ed25519 **et**
@@ -12,7 +12,10 @@ n'utilisent que la bibliothèque standard (`asyncio`, `json`).
 > mempool et ses pairs depuis son dossier de données, après revalidation
 > complète. Depuis la Partie 7, un wallet garde les clés chiffrées sous un mot
 > de passe et protège les adresses par une somme de contrôle : la graine
-> privée ne transite plus en clair. Les frais et les packs de jeu viendront ensuite.
+> privée ne transite plus en clair. Depuis la Partie 8, un nœud mine
+> directement vers une clé du wallet (`node --mine-label`), sans mot de passe :
+> les coins s'empilent dans le wallet en une commande. Les frais, l'ouverture
+> au réseau et les packs de jeu viendront ensuite.
 
 ## Installer et lancer
 
@@ -20,13 +23,13 @@ n'utilisent que la bibliothèque standard (`asyncio`, `json`).
 pip install -r requirements.txt
 ```
 
-Démonstration complète (Parties 1 à 7 : réseau simulé, vraies sockets, disque, wallet) :
+Démonstration complète (Parties 1 à 8 : réseau simulé, vraies sockets, disque, wallet, minage vers wallet) :
 
 ```bash
 python main.py
 ```
 
-Tests (368, environ 8 s ; une quinzaine utilisent de vraies sockets locales) :
+Tests (380, environ 8 s ; une quinzaine utilisent de vraies sockets locales) :
 
 ```bash
 python -m unittest -v
@@ -34,16 +37,22 @@ python -m unittest -v
 
 ### Faire tourner des nœuds dans plusieurs terminaux
 
-Terminal 1 : créer un wallet (mot de passe demandé, jamais affiché), noter
-l'adresse de la clé « mineur », puis lancer un nœud qui mine pour elle.
+Terminal 1 : créer un wallet (mot de passe demandé, jamais affiché), puis
+lancer un nœud qui mine directement vers la clé « mineur ». Le nœud lit
+l'adresse **publique** dans le wallet : aucun mot de passe, aucune adresse à
+recopier.
 
 ```bash
 python -m powchain wallet create --label mineur
 ```
 
 ```bash
-python -m powchain node --port 5000 --mine <adresse affichée par wallet create>
+python -m powchain node --port 5000 --mine-label mineur
 ```
+
+La ligne d'état du nœud affiche le solde du mineur qui monte à chaque bloc.
+(On peut aussi cibler une adresse explicite avec `--mine <adresse>`, qui
+accepte désormais la forme à somme de contrôle affichée par le wallet.)
 
 Terminal 2 : un second nœud qui rejoint le premier (il rattrape la chaîne, puis reçoit chaque nouveau bloc).
 
@@ -105,8 +114,8 @@ pow-blockchain/
 │   ├── simulation.py        SimulatedNetwork / FakeClock : plusieurs nœuds en mémoire, déterministe
 │   ├── storage.py           NodeStorage : dossier de données (blocks.jsonl, mempool.jsonl, peers.json)
 │   ├── wallet.py            Wallet : clés chiffrées dans wallet.json (compose keys.py, n'importe pas cryptography)
-│   └── __main__.py          ligne de commande : node, wallet, status ; keygen/send en legacy
-└── tests/                   368 tests unittest ; helpers.py = clés de test déterministes
+│   └── __main__.py          ligne de commande : node (--mine-label), wallet, status ; keygen/send en legacy
+└── tests/                   380 tests unittest ; helpers.py = clés de test déterministes
 ```
 
 Chaque module ne dépend que de ceux situés au-dessus de lui dans cette liste.
@@ -356,6 +365,26 @@ attrape les fautes de frappe, pas l'envoi à une adresse valide mais qui
 n'appartient à personne. Le wallet protège la clé **au repos**, pas un poste
 déjà compromis (enregistreur de frappe).
 
+## Miner vers son wallet (Partie 8)
+
+`python -m powchain node --port 5000 --mine-label mineur` fait miner le nœud
+directement vers la clé « mineur » du wallet (`--wallet`, défaut `wallet.json`).
+
+Point clé : **miner vers une adresse n'exige que la clé publique** — on mine
+*vers* une adresse, on ne signe rien avec. Le nœud n'a donc besoin que de
+l'**adresse** de la clé, qu'il lit en clair dans le wallet : **aucun mot de
+passe**, la graine chiffrée n'est jamais touchée. Le pont wallet ↔ nœud vit
+entièrement dans la CLI (`resolve_miner_address`) ; `node.py` continue de
+recevoir une simple adresse et sa couche reste inchangée. La ligne d'état du
+nœud affiche le solde du mineur, qui monte à chaque bloc.
+
+`--mine <adresse>` reste possible et accepte maintenant aussi la forme à somme
+de contrôle affichée par le wallet (plus besoin de la re-taper en minuscules).
+
+Limite honnête (démo 10c) : le nœud n'a lu que la partie **publique** du
+wallet ; **dépenser** les coins minés demande toujours le mot de passe (pour
+signer). Un nœud public qui mine pour vous ne peut donc pas toucher à votre solde.
+
 ## Règles de validation
 
 **Transaction** (`validate_transaction`, structurelles) :
@@ -416,6 +445,9 @@ fichier tronquée réparée ; corruption ailleurs refusée ; écritures atomique
 - Wallet : clés chiffrées par mot de passe (scrypt + AES-256-GCM), somme de
   contrôle d'adresse, paiements signés sans exposer la graine ; fichier
   falsifié détecté au déverrouillage (section 9 de `main.py`, `wallet` en CLI).
+- Minage vers son wallet : `node --mine-label` résout une clé du wallet en
+  adresse publique (sans mot de passe) et empile les coinbases dedans ; dépenser
+  demande toujours la clé privée (section 10 de `main.py`).
 
 ## Ce qui n'est pas encore implémenté, et pourquoi plus tard
 
