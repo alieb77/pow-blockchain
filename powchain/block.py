@@ -1,4 +1,4 @@
-"""Bloc : structure, hash, bloc Genesis, création et validation (avec preuve de travail).
+"""Bloc : structure, hash, bloc Genesis, création et validation (preuve de travail, coinbase).
 
 Un Block est un enregistrement immuable. Son hash est le SHA-256 de son
 « en-tête » canonique (voir serialization.py) :
@@ -11,44 +11,41 @@ transactions (calculate_transactions_hash). Conséquences :
 * modifier n'importe quel champ d'une transaction change son hash, donc
   transactions_hash, donc le hash du bloc ;
 * changer l'ordre des transactions change aussi le hash du bloc ;
-* le minage ne re-hashe que ce petit en-tête à chaque essai de nonce, jamais
-  les transactions complètes ;
-* transactions_hash pourra être remplacé par une racine de Merkle sans
-  toucher à la structure Block.
+* le minage ne re-hashe que ce petit en-tête à chaque essai de nonce.
 
-Cycle de vie d'un bloc depuis la Partie 2 :
+Cycle de vie d'un bloc :
 
-    create_block()  -> candidat : nonce = 0, difficulté attendue, hash calculé
-                       mais (presque sûrement) supérieur à la cible
+    create_block()  -> candidat : coinbase du mineur en tête, nonce = 0,
+                       difficulté attendue, hash calculé mais (presque
+                       sûrement) supérieur à la cible
     mine_block()    -> bloc miné : nonce trouvé, hash <= cible   (mining.py)
-    add_block()     -> accepté seulement si validate_block() passe (chain.py)
+    add_block()     -> accepté si validate_block() ET l'état des comptes
+                       (state.py) l'acceptent                     (chain.py)
 
 Conventions du bloc Genesis (bloc n°0, identique sur toutes les machines) :
 
     index        = 0
     timestamp    = GENESIS_TIMESTAMP, constante fixée à 2026-01-01T00:00:00Z.
-                   JAMAIS l'heure système : sinon chaque machine aurait un
-                   Genesis différent et aucune chaîne ne serait comparable.
-    transactions = () aucune. Les premières pièces seront créées par les
-                   récompenses de minage.
-    prev_hash    = "0" * 64 : il n'y a pas de bloc précédent.
-    difficulty   = INITIAL_DIFFICULTY.
-    nonce        = GENESIS_NONCE : le Genesis obéit à la même règle de preuve
-                   de travail que les autres blocs. Son nonce a été miné une
-                   fois pour toutes puis figé dans le code, exactement comme
-                   le nonce 2083236893 du Genesis de Bitcoin.
+    transactions = () aucune, donc pas de coinbase : aucune pièce n'existe
+                   avant le premier bloc miné.
+    prev_hash    = "0" * 64
+    difficulty   = INITIAL_DIFFICULTY
+    nonce        = GENESIS_NONCE, miné une fois pour toutes puis figé.
     hash         = calculé exactement comme pour tout autre bloc.
 
-Règles de validité d'un bloc (validate_block) :
-    B1  types et bornes des champs de l'en-tête (index, timestamp, difficulty,
-        nonce en uint64 ; prev_hash et hash en hexadécimal canonique)
-    B2  transactions : tuple, chacune valide, aucun hash en double
+Règles de validité d'un bloc (validate_block), hors état des comptes :
+    B1  types et bornes des champs de l'en-tête
+    B2  transactions : tuple d'au plus MAX_TRANSACTIONS_PER_BLOCK éléments,
+        chacune valide (R1-R7), aucun hash en double
     B3  chaînage : index = précédent + 1, prev_hash = hash du précédent,
         timestamp strictement supérieur à celui du précédent
     B4  difficulty = difficulté attendue par la règle d'ajustement
-        (proof_of_work.expected_difficulty) ; GENESIS_DIFFICULTY pour le bloc 0
     B5  hash stocké = hash recalculé
     B6  preuve de travail : hash <= cible de la difficulté du bloc
+    B7  coinbase : pour tout bloc n°>=1, la première transaction est une
+        coinbase, unique dans le bloc, dont sequence = index du bloc et
+        amount = block_reward(index). Le Genesis n'en a pas.
+Les règles d'état (séquence attendue, solde suffisant) sont dans state.py.
 """
 
 import time
@@ -57,6 +54,7 @@ from dataclasses import dataclass
 
 from .crypto import HASH_HEX_LENGTH, is_valid_hash_hex, sha256_hex
 from .errors import InvalidBlockError, InvalidTransactionError, SerializationError
+from .money import block_reward
 from .proof_of_work import (
     INITIAL_DIFFICULTY,
     expected_difficulty,
@@ -65,7 +63,7 @@ from .proof_of_work import (
     target_from_difficulty,
 )
 from .serialization import is_uint64, serialize_block_header, serialize_transaction_hash_list
-from .transaction import Transaction, validate_transaction
+from .transaction import Transaction, create_coinbase_transaction, validate_transaction
 
 GENESIS_INDEX = 0
 GENESIS_TIMESTAMP = 1_767_225_600  # 2026-01-01T00:00:00Z, secondes Unix
@@ -76,6 +74,10 @@ GENESIS_TRANSACTIONS: tuple[Transaction, ...] = ()
 
 # Nonce de départ de tout nouveau candidat ; mine_block() le fait varier.
 INITIAL_NONCE = 0
+
+# Taille maximale d'un bloc, coinbase comprise (équivalent simplifié de la
+# limite de taille de Bitcoin : borne le coût de validation d'un bloc).
+MAX_TRANSACTIONS_PER_BLOCK = 1000
 
 
 @dataclass(frozen=True, slots=True)
@@ -109,6 +111,12 @@ class Block:
     def target(self) -> int:
         """Cible numérique que le hash de ce bloc doit respecter."""
         return target_from_difficulty(self.difficulty)
+
+    @property
+    def coinbase(self) -> Transaction | None:
+        """La transaction de récompense du bloc, ou None (Genesis, bloc mal formé)."""
+        first = self.transactions[0] if self.transactions else None
+        return first if isinstance(first, Transaction) and first.is_coinbase else None
 
     def has_valid_proof_of_work(self) -> bool:
         """Vrai si le hash stocké respecte la cible (ne vérifie pas que le hash est juste)."""
@@ -145,19 +153,32 @@ def create_genesis_block() -> Block:
 
 
 def create_block(
-    prev_block: Block, transactions: Sequence[Transaction], timestamp: int | None = None
+    prev_block: Block,
+    transactions: Sequence[Transaction],
+    miner_address: str,
+    timestamp: int | None = None,
+    coinbase_data: str = "",
 ) -> Block:
-    """Construit un CANDIDAT chaîné à prev_block : nonce = INITIAL_NONCE, difficulté attendue.
+    """Construit un CANDIDAT chaîné à prev_block : coinbase pour miner_address en tête,
+    puis transactions, nonce = INITIAL_NONCE, difficulté attendue.
 
     Le hash du candidat est calculé mais ne respecte presque sûrement pas la
     cible : il faut passer par mining.mine_block() avant Blockchain.add_block().
+    Seules les règles structurelles sont vérifiées ici ; les règles d'état
+    (soldes, séquences) le seront à l'ajout dans la chaîne. Choisir les
+    transactions via Mempool.select() garantit qu'elles passeront.
 
     Timestamp par défaut : l'heure système, forcée à être strictement
     supérieure à celle du bloc précédent (règle B3).
     """
     _require_well_formed_block(prev_block, "prev_block")
-    transaction_tuple = tuple(transactions)
-    _validate_transactions(transaction_tuple)
+    height = prev_block.index + 1
+    try:
+        coinbase = create_coinbase_transaction(miner_address, height, coinbase_data)
+    except InvalidTransactionError as error:
+        raise InvalidBlockError(f"coinbase : {error}") from None
+    transaction_tuple = (coinbase,) + tuple(transactions)
+    _validate_transactions(transaction_tuple, height)
     if timestamp is None:
         timestamp = max(int(time.time()), prev_block.timestamp + 1)
     if not is_uint64(timestamp) or timestamp <= prev_block.timestamp:
@@ -165,14 +186,7 @@ def create_block(
             f"timestamp {timestamp!r} : entier strictement supérieur à {prev_block.timestamp} attendu"
         )
     difficulty = expected_difficulty(prev_block.difficulty, prev_block.timestamp, timestamp)
-    return _build_block(
-        prev_block.index + 1,
-        timestamp,
-        transaction_tuple,
-        prev_block.hash,
-        difficulty,
-        INITIAL_NONCE,
-    )
+    return _build_block(height, timestamp, transaction_tuple, prev_block.hash, difficulty, INITIAL_NONCE)
 
 
 def _build_block(
@@ -196,11 +210,15 @@ def _build_block(
     )
 
 
-def _validate_transactions(transactions: object) -> None:
-    """Règle B2 : chaque transaction est valide et aucun hash n'apparaît deux fois."""
+def _validate_transactions(transactions: object, block_index: int) -> None:
+    """Règles B2 et B7 : liste bornée de transactions valides, sans doublon, coinbase en tête."""
     if not isinstance(transactions, tuple):
         raise InvalidBlockError(
             f"transactions : tuple attendu, reçu {type(transactions).__name__}"
+        )
+    if len(transactions) > MAX_TRANSACTIONS_PER_BLOCK:
+        raise InvalidBlockError(
+            f"trop de transactions : {len(transactions)} > {MAX_TRANSACTIONS_PER_BLOCK} (au plus)"
         )
     seen_hashes: set[str] = set()
     for position, transaction in enumerate(transactions):
@@ -213,19 +231,43 @@ def _validate_transactions(transactions: object) -> None:
                 f"transaction n°{position} dupliquée : {transaction.hash[:16]}..."
             )
         seen_hashes.add(transaction.hash)
+    _validate_coinbase(transactions, block_index)
+
+
+def _validate_coinbase(transactions: tuple[Transaction, ...], block_index: int) -> None:
+    """Règle B7 : une coinbase, en première position, au bon montant et à la bonne hauteur."""
+    if block_index == GENESIS_INDEX:
+        if any(transaction.is_coinbase for transaction in transactions):
+            raise InvalidBlockError("le Genesis ne contient pas de coinbase")
+        return
+    if not transactions or not transactions[0].is_coinbase:
+        raise InvalidBlockError("la première transaction du bloc doit être la coinbase")
+    coinbase = transactions[0]
+    if coinbase.sequence != block_index:
+        raise InvalidBlockError(
+            f"coinbase : sequence {coinbase.sequence} au lieu de la hauteur du bloc {block_index}"
+        )
+    expected_reward = block_reward(block_index)
+    if coinbase.amount != expected_reward:
+        raise InvalidBlockError(
+            f"coinbase : récompense {coinbase.amount} au lieu de {expected_reward} unités"
+        )
+    for position, transaction in enumerate(transactions[1:], start=1):
+        if transaction.is_coinbase:
+            raise InvalidBlockError(f"transaction n°{position} : une seule coinbase par bloc")
 
 
 def validate_block(block: object, prev_block: Block | None = None) -> None:
-    """Lève InvalidBlockError si une des règles B1 à B6 est violée.
+    """Lève InvalidBlockError si une des règles B1 à B7 est violée.
 
     prev_block = None signifie « ce bloc doit être un bloc n°0 » (conventions
     de chaînage du Genesis) ; la conformité exacte au Genesis canonique est
-    vérifiée au niveau de la chaîne (chain.py).
+    vérifiée au niveau de la chaîne (chain.py), tout comme l'état des comptes.
     """
     if not isinstance(block, Block):
         raise InvalidBlockError(f"objet Block attendu, reçu {type(block).__name__}")
     _validate_header_fields(block)
-    _validate_transactions(block.transactions)
+    _validate_transactions(block.transactions, block.index)
     _validate_link(block, prev_block)
     _validate_difficulty(block, prev_block)
     expected_hash = block.calculate_hash()

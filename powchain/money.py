@@ -37,8 +37,8 @@ def parse_coin_amount(text: str) -> int:
     """
     if not isinstance(text, str):
         raise TypeError("parse_coin_amount attend une chaîne, par exemple '1.5'")
-    whole_part, _, fraction_part = text.strip().partition(".")
-    if not _is_ascii_digits(whole_part) or (fraction_part and not _is_ascii_digits(fraction_part)):
+    whole_part, separator, fraction_part = text.strip().partition(".")
+    if not _is_ascii_digits(whole_part) or (separator and not _is_ascii_digits(fraction_part)):
         raise ValueError(f"montant décimal invalide : {text!r}")
     if len(fraction_part) > COIN_DECIMALS:
         raise ValueError(f"au plus {COIN_DECIMALS} décimales autorisées : {text!r}")
@@ -52,3 +52,20 @@ def format_units(units: int) -> str:
         raise ValueError(f"format_units attend un entier >= 0, reçu {units!r}")
     whole, fraction = divmod(units, UNITS_PER_COIN)
     return f"{whole}.{fraction:0{COIN_DECIMALS}d} {COIN_SYMBOL}"
+
+
+# Émission monétaire (Partie 4). La seule façon de créer des pièces est la
+# transaction coinbase d'un bloc miné, qui vaut block_reward(hauteur). La
+# récompense est divisée par deux tous les HALVING_INTERVAL blocs, comme
+# Bitcoin. Somme de toutes les récompenses :
+#     210 000 * 50 * (1 + 1/2 + 1/4 + ...) < 210 000 * 100 = 21 000 000 COIN
+# soit strictement moins que MAX_MONEY : le plafond n'est jamais atteint.
+INITIAL_BLOCK_REWARD = 50 * UNITS_PER_COIN
+HALVING_INTERVAL = 210_000
+
+
+def block_reward(height: int) -> int:
+    """Récompense (en unités) créée par la coinbase du bloc de hauteur height (>= 1)."""
+    if not isinstance(height, int) or isinstance(height, bool) or height < 1:
+        raise ValueError(f"hauteur de bloc >= 1 attendue, reçu {height!r}")
+    return INITIAL_BLOCK_REWARD >> (height // HALVING_INTERVAL)

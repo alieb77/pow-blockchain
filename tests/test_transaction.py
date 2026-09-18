@@ -5,11 +5,14 @@ from powchain.crypto import is_valid_hash_hex
 from powchain.errors import InvalidTransactionError
 from powchain.keys import is_valid_signature_hex
 from powchain.money import MAX_MONEY
+from powchain.money import block_reward
 from powchain.transaction import (
+    COINBASE_ADDRESS,
     MAX_DATA_BYTES,
     UNSIGNED,
     Transaction,
     calculate_transaction_hash,
+    create_coinbase_transaction,
     create_signed_transaction,
     create_transaction,
     is_valid_transaction,
@@ -17,7 +20,7 @@ from powchain.transaction import (
     validate_transaction,
     verify_transaction_signature,
 )
-from tests.helpers import ALICE, BOB, CAROL, MALLORY, signed_tx
+from tests.helpers import ALICE, BOB, CAROL, MALLORY, MINER, signed_tx
 
 AMOUNT = 150_000_000
 
@@ -206,6 +209,54 @@ class ValidateTransactionTests(unittest.TestCase):
         self.assertFalse(verify_transaction_signature(Transaction(1, 2, 3, 4, 5, 6, 7)))
         bad = Transaction(ALICE.address, BOB.address, 1.0, "", 0, "0" * 64, "0" * 128)
         self.assertFalse(is_valid_transaction(bad))
+
+
+class CoinbaseTests(unittest.TestCase):
+    def test_create_coinbase_transaction(self):
+        coinbase = create_coinbase_transaction(MINER.address, 7, "message du mineur")
+        self.assertTrue(coinbase.is_coinbase)
+        self.assertFalse(coinbase.is_signed)
+        self.assertEqual(coinbase.sender, COINBASE_ADDRESS)
+        self.assertEqual(coinbase.recipient, MINER.address)
+        self.assertEqual(coinbase.amount, block_reward(7))
+        self.assertEqual(coinbase.sequence, 7)
+        self.assertEqual(coinbase.data, "message du mineur")
+        self.assertEqual(coinbase.hash, coinbase.calculate_hash())
+        self.assertTrue(is_valid_transaction(coinbase))
+
+    def test_coinbase_is_unique_per_height(self):
+        self.assertNotEqual(
+            create_coinbase_transaction(MINER.address, 1).hash,
+            create_coinbase_transaction(MINER.address, 2).hash,
+        )
+
+    def test_coinbase_address_is_reserved_and_well_formed(self):
+        self.assertEqual(len(COINBASE_ADDRESS), 64)
+        self.assertFalse(signed_tx(ALICE, BOB, 1).is_coinbase)
+        self.assertFalse(verify_transaction_signature(create_coinbase_transaction(MINER.address, 1)))
+
+    def test_signed_coinbase_is_rejected(self):
+        coinbase = create_coinbase_transaction(MINER.address, 1)
+        with self.assertRaisesRegex(InvalidTransactionError, "coinbase .* signature"):
+            validate_transaction(replace(coinbase, signature="a" * 128))
+        with self.assertRaisesRegex(InvalidTransactionError, "coinbase ne se signe pas"):
+            sign_transaction(coinbase, MINER)
+
+    def test_coinbase_rejects_bad_inputs(self):
+        for height in (0, -1, 1.0, True, None):
+            with self.subTest(height=height):
+                with self.assertRaises(InvalidTransactionError):
+                    create_coinbase_transaction(MINER.address, height)
+        for miner in ("alice", "", None):
+            with self.subTest(miner=miner):
+                with self.assertRaises(InvalidTransactionError):
+                    create_coinbase_transaction(miner, 1)
+
+    def test_zero_amount_coinbase_without_data_is_allowed(self):
+        # Quand la récompense s'éteint (après ~64 divisions), la coinbase vaut 0.
+        extinct = create_coinbase_transaction(MINER.address, 100 * 210_000)
+        self.assertEqual(extinct.amount, 0)
+        self.assertTrue(is_valid_transaction(extinct))
 
 
 if __name__ == "__main__":

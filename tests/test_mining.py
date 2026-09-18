@@ -5,7 +5,7 @@ from powchain.block import GENESIS_TIMESTAMP, create_block, create_genesis_block
 from powchain.errors import MiningError, MiningLimitError
 from powchain.mining import MiningResult, mine_block
 from powchain.proof_of_work import TARGET_BLOCK_TIME, hash_meets_target
-from tests.helpers import ALICE, BOB, signed_tx
+from tests.helpers import ALICE, BOB, MINER, signed_tx
 
 TIMESTAMP = GENESIS_TIMESTAMP + TARGET_BLOCK_TIME
 
@@ -14,7 +14,7 @@ class MineBlockTests(unittest.TestCase):
     def setUp(self):
         self.genesis = create_genesis_block()
         self.candidate = create_block(
-            self.genesis, [signed_tx(ALICE, BOB, 1)], timestamp=TIMESTAMP
+            self.genesis, [signed_tx(ALICE, BOB, 1)], MINER.address, timestamp=TIMESTAMP
         )
 
     def test_mined_block_meets_target_and_hash_is_consistent(self):

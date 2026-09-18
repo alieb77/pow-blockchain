@@ -9,8 +9,9 @@ Hiérarchie :
     │   ├── InvalidTransactionError
     │   ├── InvalidBlockError
     │   └── InvalidChainError
-    └── MiningError               le minage n'a pas pu produire de preuve de travail
-        └── MiningLimitError      la limite d'essais demandée a été atteinte
+    ├── MiningError               le minage n'a pas pu produire de preuve de travail
+    │   └── MiningLimitError      la limite d'essais demandée a été atteinte
+    └── MempoolError              refus propre à la file d'attente (plein, doublon, coinbase)
 
 Chaque exception porte un message explicite décrivant la règle violée :
 les fonctions is_valid_*() les convertissent en booléen, les fonctions
@@ -48,3 +49,12 @@ class MiningError(PowChainError):
 
 class MiningLimitError(MiningError):
     """Aucun nonce valide trouvé dans la limite d'essais demandée."""
+
+
+class MempoolError(PowChainError):
+    """Le mempool refuse une transaction pour une raison propre à la file.
+
+    Les transactions invalides en elles-mêmes (signature, séquence, solde)
+    lèvent InvalidTransactionError ; MempoolError couvre le reste : file
+    pleine, doublon, coinbase soumise par un utilisateur.
+    """
