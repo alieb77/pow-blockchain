@@ -57,7 +57,7 @@ from pathlib import Path
 from .address import has_valid_checksum, is_valid_address, normalize_address, to_checksummed_address
 from .errors import PowChainError, WalletError
 from .keys import KeyPair
-from .money import format_units, parse_coin_amount
+from .money import MIN_RELAY_FEE, format_units, parse_coin_amount
 from .network import NodeServer, local_ip_addresses
 from .node import Node
 from .protocol import (
@@ -117,13 +117,14 @@ def listen_host(args: argparse.Namespace) -> str:
 
 async def run_node(args: argparse.Namespace) -> None:
     miner_address = resolve_miner_address(args)
+    min_fee = fee_argument(args.min_fee)
     if args.memory:
-        node = Node(miner_address=miner_address, log=timestamped)
+        node = Node(miner_address=miner_address, log=timestamped, min_fee=min_fee)
         timestamped("mode --memory : rien ne sera enregistré sur le disque")
     else:
         storage = NodeStorage(args.data_dir or f"data/node-{args.port}")
         existed = storage.exists()
-        node = storage.open_node(miner_address=miner_address, log=timestamped)
+        node = storage.open_node(miner_address=miner_address, log=timestamped, min_fee=min_fee)
         timestamped(
             f"dossier {storage.directory} : chaîne {'chargée' if existed else 'créée'}, hauteur {node.height}, "
             f"travail {node.work}, {len(node.mempool)} transaction(s) en attente, "
@@ -249,14 +250,20 @@ async def run_status(args: argparse.Namespace) -> None:
         print(f"    solde projeté       {format_units(account['projected_balance'])} (séquence suivante {account['projected_next_sequence']})")
 
 
+def fee_argument(text: str | None) -> int:
+    """Frais en COIN (écriture décimale) -> unités ; omis = minimum relayé par les nœuds."""
+    return MIN_RELAY_FEE if text is None else parse_coin_amount(text)
+
+
 async def run_send(args: argparse.Namespace) -> None:
     key = KeyPair.from_seed_hex(args.seed_hex)
     amount = parse_coin_amount(args.amount)
+    fee = fee_argument(args.fee)
     sequence = args.sequence
     if sequence is None:
         (account,) = (await request(args.node, [message(GET_ACCOUNT, address=key.address)], [HELLO, ACCOUNT]))[1:]
         sequence = account["projected_next_sequence"]
-    transaction = create_signed_transaction(key, args.to, amount, args.data, sequence)
+    transaction = create_signed_transaction(key, args.to, amount, args.data, sequence, fee)
     replies = await request(
         args.node,
         [message(NEW_TRANSACTION, transaction=transaction_to_dict(transaction)), message(GET_ACCOUNT, address=key.address)],
@@ -267,7 +274,7 @@ async def run_send(args: argparse.Namespace) -> None:
         print(f"REFUSÉE : {last['reason']}")
         sys.exit(1)
     print(f"transaction {transaction.hash} envoyée à {args.node}")
-    print(f"  {format_units(amount)} de {key.address[:16]}... vers {args.to[:16]}..., séquence {sequence}")
+    print(f"  {format_units(amount)} de {key.address[:16]}... vers {args.to[:16]}..., séquence {sequence}, frais {format_units(fee)}")
     print(f"  solde projeté après envoi : {format_units(last['projected_balance'])}")
 
 
@@ -385,13 +392,14 @@ async def wallet_send(args: argparse.Namespace) -> None:
     except ValueError as error:
         raise WalletError(str(error)) from None
     amount = parse_coin_amount(args.amount)
+    fee = fee_argument(args.fee)
     password = read_password(f"Mot de passe du wallet (signer depuis « {args.from_label} ») : ")
     key = wallet.key_pair(args.from_label, password)
     sequence = args.sequence
     if sequence is None:
         (account,) = (await request(args.node, [message(GET_ACCOUNT, address=key.address)], [HELLO, ACCOUNT]))[1:]
         sequence = account["projected_next_sequence"]
-    transaction = create_signed_transaction(key, recipient, amount, args.data, sequence)
+    transaction = create_signed_transaction(key, recipient, amount, args.data, sequence, fee)
     replies = await request(
         args.node,
         [message(NEW_TRANSACTION, transaction=transaction_to_dict(transaction)), message(GET_ACCOUNT, address=key.address)],
@@ -402,7 +410,7 @@ async def wallet_send(args: argparse.Namespace) -> None:
         print(f"REFUSÉE : {last['reason']}")
         sys.exit(1)
     print(f"transaction {transaction.hash} envoyée à {args.node}")
-    print(f"  {format_units(amount)} de « {args.from_label} » vers {to_checksummed_address(recipient)[:20]}..., séquence {sequence}")
+    print(f"  {format_units(amount)} de « {args.from_label} » vers {to_checksummed_address(recipient)[:20]}..., séquence {sequence}, frais {format_units(fee)}")
     print(f"  solde projeté après envoi : {format_units(last['projected_balance'])}")
 
 
@@ -467,6 +475,8 @@ def build_parser() -> argparse.ArgumentParser:
                       help="wallet où lire --mine-label (défaut : wallet.json)")
     node.add_argument("--data-dir", default=None, metavar="DOSSIER", help="dossier de données (défaut : data/node-<port>)")
     node.add_argument("--memory", action="store_true", help="ne rien enregistrer sur le disque")
+    node.add_argument("--min-fee", default=None, metavar="COIN",
+                      help=f"frais minimal pour garder et relayer une transaction (défaut : {format_units(MIN_RELAY_FEE)})")
 
     commands.add_parser("keygen", help="générer une paire de clés")
 
@@ -479,6 +489,7 @@ def build_parser() -> argparse.ArgumentParser:
     send.add_argument("--seed-hex", required=True, help="graine privée de l'expéditeur (64 hex)")
     send.add_argument("--to", type=address_argument, required=True)
     send.add_argument("--amount", required=True, help="montant en COIN, ex. 1.5")
+    send.add_argument("--fee", default=None, help=f"frais pour le mineur en COIN (défaut : {format_units(MIN_RELAY_FEE)})")
     send.add_argument("--data", default="")
     send.add_argument("--sequence", type=int, default=None, help="sinon demandée au nœud")
 
@@ -518,6 +529,7 @@ def _build_wallet_parser(commands: "argparse._SubParsersAction") -> None:
     wsend.add_argument("--from", dest="from_label", required=True, metavar="NOM", help="clé expéditrice (label du wallet)")
     wsend.add_argument("--to", required=True, metavar="ADRESSE", help="adresse destinataire (forme à somme de contrôle)")
     wsend.add_argument("--amount", required=True, help="montant en COIN, ex. 1.5")
+    wsend.add_argument("--fee", default=None, help=f"frais pour le mineur en COIN (défaut : {format_units(MIN_RELAY_FEE)})")
     wsend.add_argument("--data", default="")
     wsend.add_argument("--sequence", type=int, default=None, help="sinon demandée au nœud")
     wsend.add_argument("--unchecked", action="store_true", help="accepter une adresse --to sans somme de contrôle vérifiée")

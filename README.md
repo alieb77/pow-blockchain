@@ -1,4 +1,4 @@
-# powchain — Parties 1 à 10 : hashes, preuve de travail, signatures, soldes, mempool, réseau P2P, disque, wallet, minage vers wallet, ouverture au réseau, résilience
+# powchain — Parties 1 à 11 : hashes, preuve de travail, signatures, soldes, mempool, réseau P2P, disque, wallet, minage vers wallet, ouverture au réseau, résilience, frais
 
 Blockchain Proof of Work construite pas à pas en Python (3.10 ou plus récent).
 Une seule dépendance externe, `cryptography`, pour les signatures Ed25519 **et**
@@ -21,7 +21,11 @@ n'utilisent que la bibliothèque standard (`asyncio`, `json`, `ipaddress`).
 > Depuis la Partie 10, un nœud tient tout seul dans la durée : il rappelle
 > ses pairs perdus avec un délai croissant, garde ses amorces `--peers` pour
 > toujours, oublie les adresses mortes et bannit dix minutes l'hôte d'un pair
-> fautif. Les frais et les packs de jeu viendront ensuite.
+> fautif. Depuis la Partie 11, chaque paiement porte un **frais** signé,
+> débité avec le montant et reversé au mineur par la coinbase ; le mempool
+> sert les meilleurs payeurs d'abord, refuse ce qui paie moins que le minimum
+> relayé et, s'il est plein, évince le moins payant : le spam a un coût. Les
+> packs de jeu viendront ensuite.
 
 ## Installer et lancer
 
@@ -138,21 +142,21 @@ nouveaux venus à entrer. Le nœud n'ouvre pas la box lui-même (pas d'UPnP).
 
 ```
 pow-blockchain/
-├── main.py                  démonstration : clés, coinbase, mempool, attaques, émission, réseau P2P, disque, wallet, ouverture au réseau
+├── main.py                  démonstration : clés, coinbase, mempool, attaques, émission, réseau P2P, disque, wallet, ouverture au réseau, résilience, frais
 ├── requirements.txt         cryptography>=42
 ├── powchain/
 │   ├── errors.py            hiérarchie d'exceptions
 │   ├── crypto.py            SHA-256 (hashlib) et format des hashes
-│   ├── money.py             montants entiers (1 COIN = 10^8 unités), récompense et émission
+│   ├── money.py             montants entiers (1 COIN = 10^8 unités), récompense et émission, frais minimal relayé
 │   ├── keys.py              Ed25519 + chiffrement (scrypt, AES-256-GCM) : SEUL module qui importe cryptography
 │   ├── address.py           adresse = clé publique en hexadécimal ; somme de contrôle d'affichage (EIP-55)
 │   ├── serialization.py     format canonique (le SEUL endroit qui définit les octets hashés)
 │   ├── proof_of_work.py     cible, difficulté, règle d'ajustement, travail
-│   ├── transaction.py       Transaction, hash, signature, coinbase, règles R1-R7
+│   ├── transaction.py       Transaction, hash, signature, frais, coinbase (récompense + frais), règles R1-R7
 │   ├── block.py             Block, Genesis, create_block (coinbase en tête), règles B1-B7
 │   ├── mining.py            mine_block : recherche du nonce
 │   ├── state.py             State immuable : soldes, séquences, règles S1-S3
-│   ├── mempool.py           Mempool : file d'attente validée contre l'état projeté (M1-M4), resync
+│   ├── mempool.py           Mempool : file d'attente validée contre l'état projeté (M1-M5), service par frais, éviction, resync
 │   ├── chain.py             Blockchain (blocs + état + index par hash), validate_chain, chain_work
 │   ├── codec.py             Transaction / Block <-> dictionnaires JSON (réseau et disque)
 │   ├── protocol.py          catalogue des messages, enveloppe JSON, une ligne par message ; portée des adresses
@@ -162,7 +166,7 @@ pow-blockchain/
 │   ├── storage.py           NodeStorage : dossier de données (blocks.jsonl, mempool.jsonl, peers.json)
 │   ├── wallet.py            Wallet : clés chiffrées dans wallet.json (compose keys.py, n'importe pas cryptography)
 │   └── __main__.py          ligne de commande : node (--public, --mine-label), wallet, status ; keygen/send en legacy
-└── tests/                   443 tests unittest ; helpers.py = clés de test déterministes
+└── tests/                   463 tests unittest ; helpers.py = clés de test déterministes
 ```
 
 Chaque module ne dépend que de ceux situés au-dessus de lui dans cette liste.
@@ -183,13 +187,14 @@ qui permet de tester forks, réorganisations et persistance de façon détermini
 | Adresse | la clé publique Ed25519 en hexadécimal minuscule (64 caractères) |
 | Signature | Ed25519 des 32 octets du hash de la transaction, hexadécimal (128 caractères) |
 | `sequence` | numéro de séquence du compte expéditeur : la n-ième transaction émise porte `n-1` ; anti-rejeu |
-| Coinbase | transaction dont `sender` est l'adresse réservée `"0"*64`, non signée, `sequence` = hauteur du bloc, `amount` = `block_reward(hauteur)` |
-| Récompense | 50 COIN, divisée par deux tous les 210 000 blocs ; total < 21 M COIN |
+| Coinbase | transaction dont `sender` est l'adresse réservée `"0"*64`, non signée, `fee = 0`, `sequence` = hauteur du bloc, `amount` = `block_reward(hauteur)` + somme des frais du bloc |
+| Récompense | 50 COIN, divisée par deux tous les 210 000 blocs ; total < 21 M COIN ; les frais ne créent rien, ils changent de main |
+| `fee` | frais en unités, signé avec le reste, débité de l'expéditeur **en plus** de `amount`, reversé au mineur par la coinbase ; la chaîne accepte `fee >= 0`, le mempool exige `fee >= MIN_RELAY_FEE` (0.0001 COIN, `node --min-fee`) |
 | `data` | chaîne UTF-8 opaque de 1024 octets max ; réservée aux futures métadonnées de packs |
 | Timestamp | entier, secondes Unix UTC ; strictement croissant d'un bloc au suivant ; au plus 120 s dans le futur pour être relayé (règle N1) |
 | Difficulté | entier `>= 1` stocké dans l'en-tête et hashé ; cible `= (2^256 - 1) // difficulté` |
 | Genesis | `index 0`, `timestamp 1767225600`, aucune transaction (donc aucune pièce), `difficulty 4096`, `nonce 5237`, hash `000cb9d4…facd` figé par un test |
-| Message réseau | un objet JSON `{"type", "payload"}` par ligne, 16 Mio max ; `PROTOCOL_VERSION = 1` |
+| Message réseau | un objet JSON `{"type", "payload"}` par ligne, 16 Mio max ; `PROTOCOL_VERSION = 2` (transactions avec frais) |
 | Adresse réseau | `hôte:port` ; un nœud écoute sur `--port` (`127.0.0.1` par défaut, toutes les interfaces avec `--public`), un client éphémère annonce `listen_port: null` |
 | Portée d'un hôte | `loopback` (127.x, `localhost`, `::1`, `0.0.0.0`) < `private` (toute adresse non routable sur Internet : 10/8, 172.16/12, 192.168/16, lien local…) < `public` (le reste, et les noms d'hôte) ; une adresse n'est annoncée qu'à un pair au moins aussi proche que sa portée |
 | Dossier de données | `data/node-<port>/` : `blocks.jsonl` (un bloc par ligne, Genesis compris), `mempool.jsonl`, `peers.json` (`{"version": 1, "addresses": [...]}`) |
@@ -202,7 +207,7 @@ qui permet de tester forks, réorganisations et persistance de façon détermini
 - **Étiquette de domaine** : chaque structure commence par une constante versionnée.
 
 ```
-Transaction : "powchain/tx/v2"     | sender | recipient | amount | data | sequence
+Transaction : "powchain/tx/v3"     | sender | recipient | amount | fee | data | sequence
 Liste de tx : "powchain/txlist/v1" | n      | hash_1 | ... | hash_n
 Bloc        : "powchain/block/v2"  | index | timestamp | transactions_hash | prev_hash | difficulty | nonce
 ```
@@ -224,8 +229,8 @@ chain, pool = Blockchain(), Mempool()
 # 1. Le mineur crée la monnaie : un bloc ne contenant que sa coinbase.
 chain.add_block(mine_block(create_block(chain.last_block, [], miner.address)).block)
 
-# 2. Il paie alice ; la transaction attend dans le mempool, validée contre l'état projeté.
-pool.add(create_signed_transaction(miner, alice.address, parse_coin_amount("10"), sequence=0), chain.state)
+# 2. Il paie alice (plus le frais minimal) ; la transaction attend dans le mempool, validée contre l'état projeté.
+pool.add(create_signed_transaction(miner, alice.address, parse_coin_amount("10"), sequence=0, fee=MIN_RELAY_FEE), chain.state)
 
 # 3. Le prochain bloc inclut ce que le mempool sélectionne, puis le mempool est purgé.
 block = mine_block(create_block(chain.last_block, pool.select(chain.state), miner.address)).block
@@ -474,7 +479,7 @@ correspond pas, sauf `--unchecked`.
 | `wallet import --seed-hex H [--label NOM]` | ajoute une clé existante (sauvegarde) | demandé |
 | `wallet list` / `wallet address --label NOM` | adresses à somme de contrôle | non |
 | `wallet balance --node N [--label NOM]` | interroge un nœud | non |
-| `wallet send --from NOM --to ADRESSE --amount A` | signe et diffuse un paiement | demandé |
+| `wallet send --from NOM --to ADRESSE --amount A [--fee F]` | signe et diffuse un paiement (frais : minimum relayé par défaut) | demandé |
 | `wallet export --label NOM` | révèle la graine (pour la sauvegarder) | demandé |
 
 Le mot de passe est lu par `getpass` (jamais affiché, jamais dans `argv`) ; en
@@ -509,24 +514,67 @@ Limite honnête (démo 10c) : le nœud n'a lu que la partie **publique** du
 wallet ; **dépenser** les coins minés demande toujours le mot de passe (pour
 signer). Un nœud public qui mine pour vous ne peut donc pas toucher à votre solde.
 
+## Frais de transaction (Partie 11)
+
+Chaque transaction porte un champ `fee` (unités), **signé** avec le reste :
+personne ne peut changer ce qu'un expéditeur a consenti à payer. L'expéditeur
+est débité de `amount + fee`, le destinataire reçoit `amount`, et les frais
+reviennent au mineur du bloc **par la coinbase**, dont le montant vaut
+`block_reward(hauteur) + somme des frais du bloc` (règle B7). Les frais ne
+créent donc aucune monnaie : sur un bloc entier, la masse monétaire ne bouge
+que de la récompense (démo 13d).
+
+Deux niveaux, volontairement distincts :
+
+- **Règle de la chaîne** : `fee >= 0`, et la coinbase collecte *exactement* la
+  somme des frais (un bloc qui en prend plus ou moins est invalide). Un mineur
+  reste libre d'inclure une transaction gratuite dans **son** bloc : il en paie
+  le coût en preuve de travail, et cela ne coûte rien aux autres (démo 13a).
+- **Politique de relais** (`Mempool`, règle M5) : un nœud n'attend ni ne relaie
+  une transaction qui paie moins que `MIN_RELAY_FEE` (0.0001 COIN ; réglable
+  par `node --min-fee`). C'est ce qui protège le réseau : inonder les mempools
+  de milliers de transactions coûte des coins à l'attaquant, et un mempool
+  **plein** n'accepte une nouvelle transaction que si elle paie plus que la
+  moins payante en attente, qui est alors évincée avec ce qui en dépend
+  (règle M4, démo 13c). Comme dans Bitcoin (`minrelaytxfee`), la politique
+  peut évoluer sans changer les hashes ni casser le consensus.
+
+Le mempool sert les transactions **par frais décroissant** (à frais égal, par
+ordre d'arrivée), tout en respectant pour chaque expéditeur l'ordre de ses
+séquences : sa transaction n°1 ne passe jamais avant sa n°0, même si elle paie
+plus (démo 13b). Une transaction qui dépend d'un crédit encore en attente peut
+donc être servie un bloc plus tard que dans l'ordre d'arrivée.
+
+Côté CLI : `wallet send --fee 0.0005` (défaut : le minimum relayé) ; la ligne
+de confirmation affiche les frais payés. Ce changement de format
+(`powchain/tx/v3`, `PROTOCOL_VERSION = 2`) rend les chaînes et les nœuds des
+Parties 1 à 10 incompatibles : on repart du Genesis.
+
+Limites honnêtes : le seuil est fixe (pas d'estimation de frais selon la
+charge, pas de marché des frais) ; un mineur peut toujours remplir ses propres
+blocs de transactions gratuites ; les frais n'empêchent pas un pair de nous
+envoyer des messages invalides en boucle (une limite de débit par pair viendra
+avec l'ouverture publique) ; et la priorité aux frais est locale à chaque
+mempool : deux nœuds honnêtes peuvent servir dans un ordre différent.
+
 ## Règles de validation
 
 **Transaction** (`validate_transaction`, structurelles) :
 
 - R1 `sender` et `recipient` sont des adresses valides ;
-- R2 `amount` entier dans les bornes ;
+- R2 `amount` et `fee` entiers dans les bornes ;
 - R3 `data` chaîne UTF-8 de taille bornée ;
 - R4 non vide : `amount > 0` ou `data` non vide (exemption pour la coinbase) ;
 - R5 `sequence` entier `uint64` ;
 - R6 hash stocké bien formé et égal au hash recalculé ;
-- R7 transaction normale : signature valide pour `sender` ; coinbase : aucune signature.
+- R7 transaction normale : signature valide pour `sender` ; coinbase : aucune signature et `fee = 0`.
 
 **État** (`State.apply_transaction`, appliquées dans l'ordre du bloc) :
 
 - S1 `sequence` égale au prochain numéro attendu du compte expéditeur (anti-rejeu, ordre) ;
-- S2 solde de l'expéditeur suffisant (interdit double dépense et découvert) ;
+- S2 solde de l'expéditeur `>= amount + fee` (interdit double dépense et découvert) ; il est débité de `amount + fee`, le destinataire crédité de `amount` ;
 - S3 aucun solde ne dépasse `MAX_MONEY` ;
-- coinbase : crédite le mineur sans débiter personne.
+- coinbase : crédite le mineur (récompense + frais du bloc) sans débiter personne.
 
 **Bloc** (`validate_block(block, prev_block)`) :
 
@@ -536,12 +584,15 @@ signer). Un nœud public qui mine pour vous ne peut donc pas toucher à votre so
 - B4 `difficulty` égale à la difficulté attendue par la règle d'ajustement ;
 - B5 hash stocké égal au hash recalculé ;
 - B6 preuve de travail : `hash <= cible` ;
-- B7 coinbase unique en première position, `sequence` = hauteur, `amount` = `block_reward(hauteur)` ; le Genesis n'en a pas.
+- B7 coinbase unique en première position, `sequence` = hauteur, `amount` = `block_reward(hauteur)` + somme des frais du bloc ; le Genesis n'en a pas.
 
 **Mempool** (`Mempool.add(tx, state)`) : M1 valide et pas une coinbase ; M2 pas de
 doublon ; M3 applicable sur l'état projeté (état + transactions en attente) ;
-M4 capacité. Service dans l'ordre d'arrivée, pas encore de frais.
-`resync(state, extra)` rejoue tout après une réorganisation.
+M4 capacité : plein, il n'admet qu'une transaction payant plus que la moins
+payante en attente, qui est évincée avec ses dépendantes ; M5 `fee >= min_fee`
+(politique de relais). `select` sert par frais décroissant, séquences d'un même
+expéditeur dans l'ordre. `resync(state, extra)` rejoue tout après une
+réorganisation, politique de frais comprise.
 
 **Chaîne** (`validate_chain`) : Genesis canonique, puis chaque bloc validé
 contre le précédent ET appliqué à l'état. `compute_state` renvoie l'état final.
@@ -583,13 +634,17 @@ fichier tronquée réparée ; corruption ailleurs refusée ; écritures atomique
   jamais oubliées, adresses mortes oubliées après 12 échecs, hôte d'un pair
   fautif banni 10 min sauf la boucle locale ; réseau simulé avec un hôte par
   nœud (section 12 de `main.py`, `tests/test_resilience.py`).
+- Frais : champ `fee` signé, débité avec le montant, reversé au mineur par la
+  coinbase (exactement, sinon bloc invalide) ; mempool servi par frais
+  décroissant, minimum relayé configurable, éviction du moins payant quand il
+  est plein (section 13 de `main.py`, `tests/test_fees.py`).
 
 ## Ce qui n'est pas encore implémenté, et pourquoi plus tard
 
 | Fonctionnalité | Pourquoi elle attend |
 |---|---|
 | Instantané de l'état | Le chargement rejoue toute la chaîne (O(n)). Un instantané périodique des soldes rendrait le démarrage immédiat, au prix d'un second format à garder cohérent avec les blocs. |
-| Frais de transaction | Sans frais, le mempool sert dans l'ordre d'arrivée ; les frais donneraient au mineur une raison d'inclure une transaction plutôt qu'une autre et protégeraient le réseau du spam. |
+| Estimation des frais, limite de débit par pair | Le seuil de relais est fixe : pas de marché des frais selon la charge. Et les frais ne freinent pas un pair qui envoie des messages *invalides* en boucle (ils sont rejetés sans coût pour lui) : une limite de débit par connexion viendra avec l'ouverture publique. |
 | Bans contournables, éclipse | Le ban est par hôte : un attaquant change d'IP, et des nœuds honnêtes derrière la même box sont bannis avec le fautif. Rappeler ses pairs ne protège pas d'un réseau de complices qui occuperaient toutes nos sorties (attaque par éclipse) : il faudrait diversifier les sources d'adresses et vérifier plusieurs pairs indépendants. |
 | Traversée de NAT | Un nœud derrière une box n'est joignable que si le port est redirigé à la main ; sinon il reste un client sortant. Pas d'UPnP, pas de relais : hors périmètre d'une blockchain pédagogique. |
 | Synchronisation par en-têtes | Un fork profond se cherche par recul géométrique et la branche est revalidée entièrement ; Bitcoin échange d'abord des en-têtes (block locator). Acceptable tant que les chaînes sont courtes. |

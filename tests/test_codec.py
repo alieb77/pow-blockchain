@@ -65,8 +65,8 @@ class TransactionCodecTests(unittest.TestCase):
 
     def test_rejects_unknown_field(self):
         data = transaction_to_dict(signed_tx(ALICE, BOB, coins(1)))
-        data["fee"] = 1
-        with self.assertRaisesRegex(CodecError, "inconnu.*fee"):
+        data["tip"] = 1
+        with self.assertRaisesRegex(CodecError, "inconnu.*tip"):
             transaction_from_dict(data)
 
     def test_rejects_wrong_types(self):
@@ -78,6 +78,8 @@ class TransactionCodecTests(unittest.TestCase):
             ("amount", True),
             ("amount", -1),
             ("amount", 2**64),
+            ("fee", -1),
+            ("fee", "0"),
             ("sequence", None),
             ("data", b"x"),
             ("hash", None),

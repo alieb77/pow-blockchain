@@ -16,12 +16,18 @@ Règles d'état (appliquées transaction par transaction, dans l'ordre du bloc) 
     S1  sequence == next_sequence du compte expéditeur. Empêche le rejeu (une
         transaction confirmée ne peut pas l'être deux fois) et impose l'ordre
         d'émission d'un même compte.
-    S2  solde du compte expéditeur >= amount. Interdit de dépenser ce qu'on
-        n'a pas ; combinée à S1, interdit la double dépense.
+    S2  solde du compte expéditeur >= amount + fee. Interdit de dépenser ce
+        qu'on n'a pas ; combinée à S1, interdit la double dépense. Le compte
+        est débité de amount + fee ; recipient reçoit amount ; les frais ne
+        sont crédités à personne ICI : ils reviennent au mineur par la
+        coinbase du bloc (B7). Sur un bloc entier, la somme des soldes ne
+        bouge donc que de la récompense : total_supply reste la somme des
+        récompenses émises.
     S3  aucun solde ne dépasse MAX_MONEY (garde-fou contre tout débordement).
     Coinbase : crédite simplement recipient, sans débiter personne : c'est
-    la création monétaire. Sa légitimité (montant, unicité, position) est
-    vérifiée par la règle B7 de block.py, pas ici.
+    la création monétaire (récompense + frais du bloc). Sa légitimité
+    (montant, unicité, position) est vérifiée par la règle B7 de block.py,
+    pas ici.
 
 State est IMMUABLE : apply_transaction() et apply_block() renvoient un nouvel
 État et laissent l'ancien intact. Un bloc refusé ne peut donc jamais laisser
@@ -97,13 +103,15 @@ class State:
                     f"sequence {transaction.sequence} : le compte {transaction.sender[:12]}... "
                     f"attend la sequence {sender.next_sequence}"
                 )
-            if sender.balance < transaction.amount:
+            debit = transaction.amount + transaction.fee
+            if sender.balance < debit:
                 raise InvalidTransactionError(
                     f"solde insuffisant : {format_units(sender.balance)} disponible, "
-                    f"{format_units(transaction.amount)} demandé"
+                    f"{format_units(debit)} demandé (montant {format_units(transaction.amount)} "
+                    f"+ frais {format_units(transaction.fee)})"
                 )
             accounts[transaction.sender] = Account(
-                balance=sender.balance - transaction.amount,
+                balance=sender.balance - debit,
                 next_sequence=sender.next_sequence + 1,
             )
         recipient = accounts.get(transaction.recipient, EMPTY_ACCOUNT)

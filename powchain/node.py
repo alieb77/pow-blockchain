@@ -109,6 +109,7 @@ from .block import Block, create_block
 from .chain import Blockchain, chain_work
 from .codec import block_from_dict, block_to_dict, blocks_from_list, blocks_to_list, transaction_from_dict, transaction_to_dict
 from .errors import CodecError, InvalidBlockError, InvalidChainError, InvalidTransactionError, MempoolError, ProtocolError
+from .money import MIN_RELAY_FEE
 from .mempool import Mempool
 from .protocol import (
     ACCOUNT,
@@ -256,6 +257,7 @@ class Node:
         clock: Callable[[], float] = time.time,
         chain: Blockchain | None = None,
         mempool: Mempool | None = None,
+        min_fee: int = MIN_RELAY_FEE,
         max_peers: int = MAX_PEERS,
         max_inbound: int = MAX_INBOUND,
         log: Callable[[str], None] | None = None,
@@ -266,7 +268,7 @@ class Node:
         self.miner_address = miner_address
         self.listen_port = listen_port
         self.chain = chain if chain is not None else Blockchain()
-        self.mempool = mempool if mempool is not None else Mempool()
+        self.mempool = mempool if mempool is not None else Mempool(min_fee=min_fee)
         self.stats: Counter[str] = Counter()
         self._clock = clock
         self._max_peers = max_peers

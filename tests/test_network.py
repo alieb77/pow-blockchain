@@ -21,6 +21,7 @@ class ServerFixture(unittest.IsolatedAsyncioTestCase):
             await server.stop()
 
     async def start(self, name: str, miner=None, **kwargs) -> NodeServer:
+        kwargs.setdefault("min_fee", 0)  # les frais (Partie 11) sont testés dans test_fees.py
         server = NodeServer(Node(node_id=name, miner_address=miner, **kwargs), mining_chunk=512)
         await server.start()
         self.servers.append(server)

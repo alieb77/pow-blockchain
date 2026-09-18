@@ -121,7 +121,7 @@ class HandshakeTests(unittest.TestCase):
 
     def test_wrong_version_disconnects(self):
         self.node.on_connect(1, "h", False)
-        only_disconnect(self.node.on_message(1, hello_from(self.other, version=2)), "version")
+        only_disconnect(self.node.on_message(1, hello_from(self.other, version=PROTOCOL_VERSION + 1)), "version")
 
     def test_bad_listen_port_disconnects(self):
         self.node.on_connect(1, "h", False)
@@ -198,7 +198,7 @@ class PeerExchangeTests(unittest.TestCase):
 class AccountQueryTests(unittest.TestCase):
     def test_account_reply_includes_projection(self):
         clock = FakeClock(START)
-        node = Node(node_id="me", chain=chain_with_blocks(1, clock), clock=clock)
+        node = Node(node_id="me", chain=chain_with_blocks(1, clock), clock=clock, min_fee=0)
         node.on_connect(1, "h", False)
         node.on_message(1, Node(node_id="client").hello())
         node.submit_transaction(signed_tx(MINER, ALICE, coins(10)))
@@ -226,9 +226,10 @@ class ThreeNodeNetwork(unittest.TestCase):
     def setUp(self):
         self.clock = FakeClock(START)
         self.net = SimulatedNetwork(self.clock)
-        self.a = self.net.add(Node(node_id="A", miner_address=MINER.address, clock=self.clock))
-        self.b = self.net.add(Node(node_id="B", clock=self.clock))
-        self.c = self.net.add(Node(node_id="C", miner_address=MALLORY.address, clock=self.clock))
+        # min_fee=0 : les frais (Partie 11) sont hors sujet ici, voir test_fees.py.
+        self.a = self.net.add(Node(node_id="A", miner_address=MINER.address, clock=self.clock, min_fee=0))
+        self.b = self.net.add(Node(node_id="B", clock=self.clock, min_fee=0))
+        self.c = self.net.add(Node(node_id="C", miner_address=MALLORY.address, clock=self.clock, min_fee=0))
         self.net.connect("A", "B")
         self.net.connect("B", "C")
         self.net.delivered.clear()
@@ -432,7 +433,7 @@ class ThreeNodeNetwork(unittest.TestCase):
 class BlockAcceptanceTests(unittest.TestCase):
     def setUp(self):
         self.clock = FakeClock(START)
-        self.node = Node(node_id="me", miner_address=MINER.address, clock=self.clock)
+        self.node = Node(node_id="me", miner_address=MINER.address, clock=self.clock, min_fee=0)
         self.node.on_connect(1, "h", False)
         self.node.on_message(1, Node(node_id="peer").hello())
         self.node.on_connect(2, "h", False)
@@ -612,7 +613,7 @@ class BlockAcceptanceTests(unittest.TestCase):
 class LocalMiningTests(unittest.TestCase):
     def setUp(self):
         self.clock = FakeClock(START)
-        self.node = Node(node_id="me", miner_address=MINER.address, clock=self.clock)
+        self.node = Node(node_id="me", miner_address=MINER.address, clock=self.clock, min_fee=0)
 
     def test_build_candidate_uses_clock_and_mempool(self):
         self.node.chain.add_block(mined(self.node.build_candidate("premier")))
@@ -659,7 +660,7 @@ class ReorganizationMempoolTests(unittest.TestCase):
     def test_resync_keeps_applicable_drops_confirmed_elsewhere(self):
         clock = FakeClock(START)
         chain = chain_with_blocks(1, clock)
-        pool = Mempool()
+        pool = Mempool(min_fee=0)
         state = chain.state
         keep = signed_tx(MINER, ALICE, coins(1), sequence=0)
         pool.add(keep, state)

@@ -44,7 +44,8 @@ Règles de validité d'un bloc (validate_block), hors état des comptes :
     B6  preuve de travail : hash <= cible de la difficulté du bloc
     B7  coinbase : pour tout bloc n°>=1, la première transaction est une
         coinbase, unique dans le bloc, dont sequence = index du bloc et
-        amount = block_reward(index). Le Genesis n'en a pas.
+        amount = block_reward(index) + somme des frais des autres
+        transactions du bloc (Partie 11). Le Genesis n'en a pas.
 Les règles d'état (séquence attendue, solde suffisant) sont dans state.py.
 """
 
@@ -118,6 +119,15 @@ class Block:
         first = self.transactions[0] if self.transactions else None
         return first if isinstance(first, Transaction) and first.is_coinbase else None
 
+    @property
+    def total_fees(self) -> int:
+        """Somme des frais payés par les transactions du bloc (la coinbase n'en paie pas)."""
+        return sum(
+            transaction.fee
+            for transaction in self.transactions
+            if isinstance(transaction, Transaction) and not transaction.is_coinbase
+        )
+
     def has_valid_proof_of_work(self) -> bool:
         """Vrai si le hash stocké respecte la cible (ne vérifie pas que le hash est juste)."""
         return hash_meets_target(self.hash, self.difficulty) if is_valid_difficulty(self.difficulty) else False
@@ -173,11 +183,18 @@ def create_block(
     """
     _require_well_formed_block(prev_block, "prev_block")
     height = prev_block.index + 1
+    transactions = tuple(transactions)
+    for position, transaction in enumerate(transactions, start=1):
+        try:
+            validate_transaction(transaction)
+        except InvalidTransactionError as error:
+            raise InvalidBlockError(f"transaction n°{position} invalide : {error}") from None
+    fees = sum(transaction.fee for transaction in transactions)
     try:
-        coinbase = create_coinbase_transaction(miner_address, height, coinbase_data)
+        coinbase = create_coinbase_transaction(miner_address, height, coinbase_data, fees)
     except InvalidTransactionError as error:
         raise InvalidBlockError(f"coinbase : {error}") from None
-    transaction_tuple = (coinbase,) + tuple(transactions)
+    transaction_tuple = (coinbase,) + transactions
     _validate_transactions(transaction_tuple, height)
     if timestamp is None:
         timestamp = max(int(time.time()), prev_block.timestamp + 1)
@@ -247,14 +264,17 @@ def _validate_coinbase(transactions: tuple[Transaction, ...], block_index: int) 
         raise InvalidBlockError(
             f"coinbase : sequence {coinbase.sequence} au lieu de la hauteur du bloc {block_index}"
         )
-    expected_reward = block_reward(block_index)
-    if coinbase.amount != expected_reward:
-        raise InvalidBlockError(
-            f"coinbase : récompense {coinbase.amount} au lieu de {expected_reward} unités"
-        )
     for position, transaction in enumerate(transactions[1:], start=1):
         if transaction.is_coinbase:
             raise InvalidBlockError(f"transaction n°{position} : une seule coinbase par bloc")
+    reward = block_reward(block_index)
+    fees = sum(transaction.fee for transaction in transactions[1:])
+    expected = reward + fees
+    if coinbase.amount != expected:
+        raise InvalidBlockError(
+            f"coinbase : récompense {coinbase.amount} au lieu de {expected} unités "
+            f"(récompense {reward} + frais {fees})"
+        )
 
 
 def validate_block(block: object, prev_block: Block | None = None) -> None:

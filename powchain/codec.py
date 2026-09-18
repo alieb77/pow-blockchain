@@ -21,7 +21,7 @@ malformé soit détecté au plus tôt et jamais interprété « à peu près ».
 
 Format
 ------
-    transaction : {"sender", "recipient", "amount", "data", "sequence", "hash", "signature"}
+    transaction : {"sender", "recipient", "amount", "fee", "data", "sequence", "hash", "signature"}
     bloc        : {"index", "timestamp", "transactions": [transaction...], "prev_hash",
                    "difficulty", "nonce", "hash"}
 
@@ -36,7 +36,7 @@ from .errors import CodecError
 from .serialization import is_uint64
 from .transaction import Transaction
 
-TRANSACTION_FIELDS = ("sender", "recipient", "amount", "data", "sequence", "hash", "signature")
+TRANSACTION_FIELDS = ("sender", "recipient", "amount", "fee", "data", "sequence", "hash", "signature")
 BLOCK_FIELDS = ("index", "timestamp", "transactions", "prev_hash", "difficulty", "nonce", "hash")
 
 
@@ -54,6 +54,7 @@ def transaction_from_dict(data: object) -> Transaction:
         sender=_require_str(fields, "sender"),
         recipient=_require_str(fields, "recipient"),
         amount=_require_uint64(fields, "amount"),
+        fee=_require_uint64(fields, "fee"),
         data=_require_str(fields, "data"),
         sequence=_require_uint64(fields, "sequence"),
         hash=_require_str(fields, "hash"),

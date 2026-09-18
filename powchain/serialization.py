@@ -30,8 +30,8 @@ Domaine        : chaque structure commence par une étiquette constante
 
 Ordre des champs
 ----------------
-Transaction : DOMAINE_TX     | sender (str) | recipient (str) | amount (uint64) | data (str)
-              | sequence (uint64)
+Transaction : DOMAINE_TX     | sender (str) | recipient (str) | amount (uint64) | fee (uint64)
+              | data (str) | sequence (uint64)
 Liste de tx : DOMAINE_TXLIST | n (uint32)   | hash_1 (32 o) | ... | hash_n (32 o)
 Bloc        : DOMAINE_BLOCK  | index (uint64) | timestamp (uint64)
               | transactions_hash (32 o) | prev_hash (32 o) | difficulty (uint64)
@@ -48,13 +48,15 @@ partie.
 
 Historique des formats :
 * bloc v1 (Partie 1) sans difficulty -> "powchain/block/v2" (Partie 2) ;
-* transaction v1 sans sequence -> "powchain/tx/v2" (Partie 3).
+* transaction v1 sans sequence -> "powchain/tx/v2" (Partie 3) ;
+* transaction v2 sans fee -> "powchain/tx/v3" (Partie 11).
 Chaque passage a changé les hashes existants ; c'est le rôle de l'étiquette
 de domaine que de rendre cette rupture explicite.
 
 Représentations retenues
 ------------------------
 amount       : entier en unités (voir money.py), encodé uint64.
+fee          : frais payés au mineur en plus de amount, en unités, encodé uint64.
 sequence     : entier >= 0, numéro de séquence anti-rejeu du compte
                expéditeur, encodé uint64.
 timestamp    : entier, secondes écoulées depuis 1970-01-01T00:00:00 UTC (temps
@@ -70,7 +72,7 @@ from collections.abc import Sequence
 from .crypto import hash_hex_to_bytes
 from .errors import SerializationError
 
-TRANSACTION_DOMAIN = b"powchain/tx/v2"
+TRANSACTION_DOMAIN = b"powchain/tx/v3"
 TRANSACTION_LIST_DOMAIN = b"powchain/txlist/v1"
 BLOCK_DOMAIN = b"powchain/block/v2"
 
@@ -124,7 +126,7 @@ def encode_hash(value: str, field_name: str = "hash") -> bytes:
 
 
 def serialize_transaction_fields(
-    sender: str, recipient: str, amount: int, data: str, sequence: int
+    sender: str, recipient: str, amount: int, fee: int, data: str, sequence: int
 ) -> bytes:
     """Octets canoniques d'une transaction (ni le hash ni la signature n'en font partie)."""
     return b"".join(
@@ -133,6 +135,7 @@ def serialize_transaction_fields(
             encode_str(sender, "sender"),
             encode_str(recipient, "recipient"),
             encode_uint64(amount, "amount"),
+            encode_uint64(fee, "fee"),
             encode_str(data, "data"),
             encode_uint64(sequence, "sequence"),
         )

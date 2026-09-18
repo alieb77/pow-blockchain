@@ -36,7 +36,7 @@ class StorageFixture(unittest.TestCase):
     def network_with_storage(self, name="A", miner=MINER, directory=None):
         """Nœud suivi par un stockage, branché sur un réseau simulé (retourne net, node, storage)."""
         storage = NodeStorage(directory or self.directory(name.lower()))
-        node = storage.open_node(node_id=name, miner_address=miner.address if miner else None, clock=self.clock)
+        node = storage.open_node(node_id=name, miner_address=miner.address if miner else None, clock=self.clock, min_fee=0)
         net = SimulatedNetwork(self.clock)
         net.add(node)
         return net, node, storage
@@ -97,7 +97,7 @@ class RoundTripTests(StorageFixture):
         pending = signed_tx(MINER, ALICE, coins(1))
         net.run("A", node.submit_transaction(pending))
         self.assertEqual(len(read_lines(storage.mempool_path)), 1)
-        reloaded = NodeStorage(storage.directory).open_node(node_id="A2")
+        reloaded = NodeStorage(storage.directory).open_node(node_id="A2", min_fee=0)
         self.assertEqual(reloaded.mempool.transactions, (pending,))
         # Le bloc suivant la confirme : le fichier du mempool est vidé.
         net.add(reloaded)

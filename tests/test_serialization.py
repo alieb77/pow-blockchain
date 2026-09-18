@@ -73,8 +73,8 @@ class EncodeHashTests(unittest.TestCase):
 
 class StructureSerializationTests(unittest.TestCase):
     def test_transaction_serialization_is_deterministic(self):
-        first = serialize_transaction_fields("alice", "bob", 150_000_000, "note", 3)
-        second = serialize_transaction_fields("alice", "bob", 150_000_000, "note", 3)
+        first = serialize_transaction_fields("alice", "bob", 150_000_000, 10_000, "note", 3)
+        second = serialize_transaction_fields("alice", "bob", 150_000_000, 10_000, "note", 3)
         self.assertEqual(first, second)
 
     def test_transaction_layout(self):
@@ -83,27 +83,33 @@ class StructureSerializationTests(unittest.TestCase):
             + b"\x00\x00\x00\x05alice"
             + b"\x00\x00\x00\x03bob"
             + b"\x00" * 7 + b"\x07"
+            + b"\x00" * 7 + b"\x03"
             + b"\x00\x00\x00\x00"
             + b"\x00" * 7 + b"\x02"
         )
-        self.assertEqual(serialize_transaction_fields("alice", "bob", 7, "", 2), expected)
+        self.assertEqual(serialize_transaction_fields("alice", "bob", 7, 3, "", 2), expected)
 
     def test_transaction_field_order_matters(self):
         self.assertNotEqual(
-            serialize_transaction_fields("alice", "bob", 1, "", 0),
-            serialize_transaction_fields("bob", "alice", 1, "", 0),
+            serialize_transaction_fields("alice", "bob", 1, 0, "", 0),
+            serialize_transaction_fields("bob", "alice", 1, 0, "", 0),
         )
         self.assertNotEqual(
-            serialize_transaction_fields("alice", "bob", 1, "", 0),
-            serialize_transaction_fields("alice", "bob", 1, "", 1),
+            serialize_transaction_fields("alice", "bob", 1, 0, "", 0),
+            serialize_transaction_fields("alice", "bob", 1, 0, "", 1),
+        )
+        self.assertNotEqual(
+            serialize_transaction_fields("alice", "bob", 1, 0, "", 0),
+            serialize_transaction_fields("alice", "bob", 0, 1, "", 0),  # amount et fee ne se confondent pas
         )
 
     def test_transaction_rejects_none_fields(self):
         for args in (
-            ("alice", "bob", 1, None, 0),
-            (None, "bob", 1, "", 0),
-            ("alice", "bob", None, "", 0),
-            ("alice", "bob", 1, "", None),
+            ("alice", "bob", 1, 0, None, 0),
+            (None, "bob", 1, 0, "", 0),
+            ("alice", "bob", None, 0, "", 0),
+            ("alice", "bob", 1, None, "", 0),
+            ("alice", "bob", 1, 0, "", None),
         ):
             with self.subTest(args=args):
                 with self.assertRaises(SerializationError):
@@ -150,7 +156,7 @@ class StructureSerializationTests(unittest.TestCase):
     def test_domains_and_format_versions(self):
         self.assertNotEqual(TRANSACTION_DOMAIN, BLOCK_DOMAIN)
         self.assertNotEqual(TRANSACTION_DOMAIN, TRANSACTION_LIST_DOMAIN)
-        self.assertEqual(TRANSACTION_DOMAIN, b"powchain/tx/v2")
+        self.assertEqual(TRANSACTION_DOMAIN, b"powchain/tx/v3")
         self.assertEqual(BLOCK_DOMAIN, b"powchain/block/v2")
 
 

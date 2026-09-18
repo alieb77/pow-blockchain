@@ -1,4 +1,4 @@
-"""Démonstration des Parties 1 à 10 : hashes, PoW, signatures, soldes, mempool, réseau P2P, disque, wallet, réseau ouvert, résilience.
+"""Démonstration des Parties 1 à 11 : hashes, PoW, signatures, soldes, mempool, réseau P2P, disque, wallet, réseau ouvert, résilience, frais.
 
 Lancer depuis le dossier du projet :
 
@@ -13,8 +13,10 @@ de vraies sockets TCP locales, montre ce qu'un nœud écrit sur le disque et ce
 qu'il refuse d'y relire, un wallet qui chiffre ses clés et met une somme de
 contrôle sur les adresses, le minage vers une clé du wallet, ce qui change
 quand un nœud s'ouvre au réseau (portée des adresses, adresse propre, plafond
-d'entrées, délai de hello), et enfin la résilience (rappel des pairs perdus,
-oubli des adresses mortes, bannissement des pairs fautifs).
+d'entrées, délai de hello), la résilience (rappel des pairs perdus, oubli des
+adresses mortes, bannissement des pairs fautifs), et enfin les frais de
+transaction (politique de relais, priorité aux meilleurs payeurs, éviction,
+frais reversés au mineur par la coinbase).
 """
 
 import asyncio
@@ -32,6 +34,7 @@ from powchain import (
     MAX_DIAL_FAILURES,
     MAX_FUTURE_DRIFT_SECONDS,
     MAX_PEERS,
+    MIN_RELAY_FEE,
     RECONNECT_MAX_DELAY,
     TARGET_BLOCK_TIME,
     Block,
@@ -73,6 +76,7 @@ from powchain import (
 from powchain.protocol import NEW_BLOCK, PEERS
 
 RULE = "=" * 76
+FEE = MIN_RELAY_FEE  # frais minimal relayé : ce que paient les transactions de la démo
 
 
 def print_title(title: str) -> None:
@@ -100,9 +104,10 @@ def print_block(block: Block, names: dict[str, str]) -> None:
     print(f"  hash {block.hash}")
     for position, tx in enumerate(block.transactions):
         kind = "coinbase " if tx.is_coinbase else "tx       "
+        fee = "" if tx.is_coinbase else f"  frais {tx.fee} u"
         print(
             f"    [{position}] {kind} {name_of(tx.sender, names):<9} -> {name_of(tx.recipient, names):<9} "
-            f"{format_units(tx.amount):>18}  seq {tx.sequence}"
+            f"{format_units(tx.amount):>18}  seq {tx.sequence}{fee}"
         )
 
 
@@ -157,7 +162,7 @@ def demo_genesis_and_first_reward(wallets: dict[str, KeyPair], names: dict[str, 
     print_title("2. Au départ, personne n'a rien : la monnaie naît avec le minage")
     chain, pool = Blockchain(), Mempool()
     print(f"  État après le Genesis : {chain.state!r}")
-    submit(pool, chain.state, "alice -> bob 1 COIN (alice n'a rien)", create_signed_transaction(wallets["alice"], wallets["bob"].address, parse_coin_amount("1")))
+    submit(pool, chain.state, "alice -> bob 1 COIN (alice n'a rien)", create_signed_transaction(wallets["alice"], wallets["bob"].address, parse_coin_amount("1"), fee=FEE))
 
     print("\n  Le mineur mine le bloc n°1. Il ne contient que sa coinbase : la récompense.")
     mine_next(chain, pool, wallets["miner"], names, coinbase_data="premier bloc")
@@ -172,7 +177,11 @@ def demo_genesis_and_first_reward(wallets: dict[str, KeyPair], names: dict[str, 
 def demo_mempool(chain: Blockchain, pool: Mempool, wallets: dict[str, KeyPair], names: dict[str, str]) -> None:
     print_title("3. Le mempool : salle d'attente validée contre l'état projeté")
     miner, alice, bob, carol = (wallets[n] for n in ("miner", "alice", "bob", "carol"))
-    pay = create_signed_transaction
+    print(f"  (chaque paiement porte le frais minimal relayé, {format_units(FEE)} ; voir la section 13)")
+
+    def pay(sender: KeyPair, recipient: str, amount: int, sequence: int = 0) -> Transaction:
+        return create_signed_transaction(sender, recipient, amount, sequence=sequence, fee=FEE)
+
     submit(pool, chain.state, "miner -> alice 10 COIN, seq 0", pay(miner, alice.address, parse_coin_amount("10"), sequence=0))
     submit(pool, chain.state, "miner -> bob 5 COIN, seq 1", pay(miner, bob.address, parse_coin_amount("5"), sequence=1))
     submit(pool, chain.state, "miner -> bob 5 COIN, seq 1 (doublon)", pay(miner, bob.address, parse_coin_amount("5"), sequence=1))
@@ -284,7 +293,7 @@ def demo_simulated_network(wallets: dict[str, KeyPair], names: dict[str, str]) -
     clock.advance(TARGET_BLOCK_TIME)
     net.mine("A")
     mark = len(net.delivered)
-    net.run("C", c.submit_transaction(create_signed_transaction(miner, alice.address, parse_coin_amount("10"), sequence=0)))
+    net.run("C", c.submit_transaction(create_signed_transaction(miner, alice.address, parse_coin_amount("10"), sequence=0, fee=FEE)))
     print(f"    transaction soumise à C ; en attente sur A : {len(a.mempool)}, B : {len(b.mempool)}, C : {len(c.mempool)}")
     clock.advance(TARGET_BLOCK_TIME)
     block = net.mine("C")
@@ -299,7 +308,7 @@ def demo_simulated_network(wallets: dict[str, KeyPair], names: dict[str, str]) -
     net.partition("A", "B")
     net.partition("A", "C")
     block_a = net.mine("A", coinbase_data="branche A")
-    pay_bob = create_signed_transaction(miner, bob.address, parse_coin_amount("7"), sequence=1)
+    pay_bob = create_signed_transaction(miner, bob.address, parse_coin_amount("7"), sequence=1, fee=FEE)
     net.run("C", c.submit_transaction(pay_bob))
     block_c = net.mine("C", coinbase_data="branche C")
     print(f"    A a le bloc {block_a.hash[:10]}..., B et C ont le bloc {block_c.hash[:10]}... (même travail : chacun garde le sien)")
@@ -408,7 +417,7 @@ async def demo_real_sockets(wallets: dict[str, KeyPair]) -> None:
     print("    A se met à miner : chaque bloc trouvé traverse le réseau (le minage tourne par tranches dans asyncio).")
     a.start_mining(miner.address)
     await c.wait_until(lambda: c.node.height >= 3, timeout=20)
-    tx = create_signed_transaction(miner, alice.address, parse_coin_amount("1"), sequence=0)
+    tx = create_signed_transaction(miner, alice.address, parse_coin_amount("1"), sequence=0, fee=FEE)
     print("    C soumet « miner -> alice 1 COIN » ; elle voyage jusqu'à A, qui la mine ; le bloc revient jusqu'à C.")
     await c._execute(c.node.submit_transaction(tx))
     ok = await c.wait_until(lambda: c.node.chain.state.balance_of(alice.address) == parse_coin_amount("1"), timeout=20)
@@ -458,12 +467,12 @@ def demo_persistence(wallets: dict[str, KeyPair], names: dict[str, str]) -> None
         print("     attente et connaît l'adresse de B. Chaque bloc est écrit (flush + fsync) AVANT d'être relayé.")
         clock.advance(TARGET_BLOCK_TIME)
         net.mine("A")
-        net.run("A", a.submit_transaction(create_signed_transaction(miner, alice.address, parse_coin_amount("3"), sequence=0)))
+        net.run("A", a.submit_transaction(create_signed_transaction(miner, alice.address, parse_coin_amount("3"), sequence=0, fee=FEE)))
         clock.advance(TARGET_BLOCK_TIME)
         net.mine("A")
         clock.advance(TARGET_BLOCK_TIME)
         net.mine("A")
-        pending = create_signed_transaction(miner, bob.address, parse_coin_amount("1"), sequence=1)
+        pending = create_signed_transaction(miner, bob.address, parse_coin_amount("1"), sequence=1, fee=FEE)
         net.run("A", a.submit_transaction(pending))
         print_files(storage)
         first_line = storage.blocks_path.read_text(encoding="utf-8").splitlines()[1]
@@ -563,7 +572,7 @@ def demo_wallet(wallets: dict[str, KeyPair]) -> None:
 
         print("\n[9c] Une clé du wallet signe une vraie transaction, acceptée par les règles de la chaîne (R1-R7),")
         print("     sans que la graine quitte jamais le wallet en clair.")
-        tx = create_signed_transaction(recovered, wallet.address_of("bob"), parse_coin_amount("1"), sequence=0)
+        tx = create_signed_transaction(recovered, wallet.address_of("bob"), parse_coin_amount("1"), sequence=0, fee=FEE)
         print(f"    is_valid_transaction : {is_valid_transaction(tx)}")
 
         print("\n[9d] Somme de contrôle d'adresse (façon EIP-55, adaptée à SHA-256). La CASSE encode un contrôle :")
@@ -772,6 +781,64 @@ def demo_resilience() -> None:
     print("     chaîne. La parade reste des amorces --peers de confiance et, à terme, plusieurs sources indépendantes.")
 
 
+# ----------------------------------------------------------------------------
+# Partie 11 : frais de transaction
+# ----------------------------------------------------------------------------
+
+
+def demo_fees() -> None:
+    print_title("13. Frais : chaque paiement rémunère le mineur ; le mempool sert les meilleurs payeurs d'abord")
+    miner, alice, bob, carol = (KeyPair.generate() for _ in range(4))
+    names = {miner.address: "miner", alice.address: "alice", bob.address: "bob", carol.address: "carol", "0" * 64: "COINBASE"}
+    chain, pool = Blockchain(), Mempool()
+    print("  Bloc n°1 : la récompense au mineur.")
+    mine_next(chain, pool, miner, names)
+    for recipient, sequence in ((alice, 0), (bob, 1)):
+        pool.add(create_signed_transaction(miner, recipient.address, parse_coin_amount("10"), sequence=sequence, fee=FEE), chain.state)
+    print(f"\n  Bloc n°2 : le mineur finance alice et bob (10 COIN chacun, frais {format_units(FEE)} chacun).")
+    block = mine_next(chain, pool, miner, names)
+    print(f"  coinbase = récompense {format_units(block_reward(2))} + frais {format_units(block.total_fees)} = {format_units(block.coinbase.amount)}")
+    print_state(chain.state, names)
+
+    print(f"\n[13a] Politique de relais : un nœud n'attend ni ne relaie une transaction payant moins de {format_units(MIN_RELAY_FEE)}.")
+    submit(pool, chain.state, "alice -> carol 1 COIN, frais 0", create_signed_transaction(alice, carol.address, parse_coin_amount("1"), fee=0))
+    submit(pool, chain.state, f"alice -> carol 1 COIN, frais {MIN_RELAY_FEE - 1} unités", create_signed_transaction(alice, carol.address, parse_coin_amount("1"), fee=MIN_RELAY_FEE - 1))
+    print("     Mais c'est une POLITIQUE, pas une règle de la chaîne : un mineur peut inclure lui-même une")
+    print("     transaction gratuite dans SON bloc (il en paie le coût en preuve de travail).")
+    free = create_signed_transaction(alice, carol.address, parse_coin_amount("1"), fee=0)
+    report_chain("Chain valid with a fee-less transaction mined directly", list(chain.blocks) + [hand_built(chain.last_block, [free], miner)])
+
+    print("\n[13b] Priorité aux frais. Trois paiements arrivent dans l'ordre : alice (frais x1), miner (x2), bob (x5).")
+    cheap = create_signed_transaction(alice, carol.address, parse_coin_amount("1"), fee=FEE)
+    mid = create_signed_transaction(miner, carol.address, parse_coin_amount("1"), sequence=2, fee=2 * FEE)
+    dear = create_signed_transaction(bob, carol.address, parse_coin_amount("1"), fee=5 * FEE)
+    for tx in (cheap, mid, dear):
+        pool.add(tx, chain.state)
+    order = [name_of(tx.sender, names) for tx in pool.select(chain.state)]
+    print(f"     ordre de service pour le prochain bloc : {' > '.join(order)} (bob paie le plus : il passe en premier)")
+    print("     Un même expéditeur reste servi dans l'ordre de ses séquences, quel que soit le frais de chacune.")
+
+    print("\n[13c] Mempool plein (capacité 2 pour la démo) : entrer coûte plus que le moins payant, qui est évincé.")
+    small = Mempool(max_size=2)
+    small.add(cheap, chain.state)
+    small.add(mid, chain.state)
+    submit(small, chain.state, "miner -> carol, seq 3, frais x1 (pas mieux que le moins payant)", create_signed_transaction(miner, carol.address, parse_coin_amount("1"), sequence=3, fee=FEE))
+    evicted = small.add(dear, chain.state)
+    print(f"     bob (frais x5) entre ; évincée : {', '.join(name_of(tx.sender, names) for tx in evicted)} (frais x1) ; "
+          f"en attente : {', '.join(name_of(tx.sender, names) for tx in small.transactions)}")
+
+    print("\n[13d] Le bloc suivant reverse tous les frais au mineur ; la masse monétaire ne bouge que de la récompense.")
+    before = chain.state.total_supply
+    block = mine_next(chain, pool, miner, names)
+    print(f"     coinbase = {format_units(block_reward(block.index))} + frais {format_units(block.total_fees)} = {format_units(block.coinbase.amount)}")
+    print(f"     masse monétaire : {format_units(before)} -> {format_units(chain.state.total_supply)} "
+          f"(+ {format_units(chain.state.total_supply - before)} : la récompense seule, les frais ne créent rien)")
+    print_state(chain.state, names)
+    print("\n  Limites honnêtes : le seuil est fixe (pas d'estimation de frais selon la charge) ; un mineur peut")
+    print("  toujours remplir SES blocs de transactions gratuites (il en paie la preuve de travail) ; et les frais")
+    print("  ne remplacent pas une limite de débit par pair, qui viendra avec l'ouverture publique du réseau.")
+
+
 def main() -> None:
     wallets, names = demo_keys()
     chain, pool = demo_genesis_and_first_reward(wallets, names)
@@ -785,6 +852,7 @@ def main() -> None:
     demo_mine_to_wallet()
     demo_open_network()
     demo_resilience()
+    demo_fees()
     print()
 
 

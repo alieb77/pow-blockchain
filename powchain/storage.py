@@ -49,6 +49,7 @@ from .chain import Blockchain
 from .codec import block_from_dict, block_to_dict, transaction_from_dict, transaction_to_dict
 from .errors import CodecError, InvalidChainError, InvalidTransactionError, MempoolError, StorageError
 from .mempool import Mempool
+from .money import MIN_RELAY_FEE
 from .node import AddressForgotten, AddressLearned, BlockAdded, ChainReorganized, Event, Node, TransactionAdded
 from .protocol import parse_address
 from .state import State
@@ -111,9 +112,11 @@ class NodeStorage:
         self._blocks_on_disk = len(blocks)
         return chain
 
-    def load_mempool(self, state: State, max_size: int | None = None) -> Mempool:
+    def load_mempool(
+        self, state: State, max_size: int | None = None, min_fee: int = MIN_RELAY_FEE
+    ) -> Mempool:
         """Le mempool du fichier, chaque transaction re-validée sur state ; les autres sont écartées."""
-        mempool = Mempool() if max_size is None else Mempool(max_size)
+        mempool = Mempool(min_fee=min_fee) if max_size is None else Mempool(max_size, min_fee=min_fee)
         self.dropped_transactions = 0
         if not self.mempool_path.exists():
             return mempool
@@ -147,15 +150,16 @@ class NodeStorage:
             addresses.append(f"{host}:{port}")
         return tuple(addresses)
 
-    def open_node(self, **node_kwargs) -> Node:
+    def open_node(self, *, min_fee: int = MIN_RELAY_FEE, **node_kwargs) -> Node:
         """Construit un Node à partir du dossier (ou d'un dossier neuf) et le suit désormais.
 
-        Les arguments sont ceux de Node (node_id, miner_address, clock, log...).
+        Les arguments sont ceux de Node (node_id, miner_address, clock, log...) ;
+        min_fee est la politique de frais du mempool rechargé (règle M5).
         Le dossier est créé s'il n'existe pas ; le Genesis est écrit aussitôt.
         """
         self.repaired_lines = 0
         chain = self.load_chain()
-        mempool = self.load_mempool(chain.state)
+        mempool = self.load_mempool(chain.state, min_fee=min_fee)
         node = Node(chain=chain, mempool=mempool, **node_kwargs)
         node.remember_addresses(self.load_addresses())
         self.follow(node)

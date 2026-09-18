@@ -181,7 +181,7 @@ class CreateBlockTests(unittest.TestCase):
         self.assertTrue(is_valid_block(block, self.genesis))
 
     def test_rejects_invalid_transaction(self):
-        bad = Transaction(ALICE.address, BOB.address, -1, "", 0, "0" * 64, "0" * 128)
+        bad = Transaction(ALICE.address, BOB.address, -1, 0, "", 0, "0" * 64, "0" * 128)
         with self.assertRaisesRegex(InvalidBlockError, "transaction n°1 invalide"):
             candidate_block(self.genesis, [bad])
 

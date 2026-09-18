@@ -21,6 +21,9 @@ connexions entrantes, délai de hello).
 Partie 10 : résilience (Node.tick : rappel des pairs avec délai croissant,
 amorces --peers jamais oubliées, oubli des adresses mortes, bannissement
 temporaire des hôtes fautifs).
+Partie 11 : frais de transaction (champ fee signé, débité avec le montant,
+reversé au mineur par la coinbase ; mempool servi par frais décroissant,
+minimum relayé MIN_RELAY_FEE et éviction des moins payantes : anti-spam).
 
 Ce module ré-exporte l'API publique pour permettre d'écrire simplement :
 
@@ -106,6 +109,7 @@ from .money import (
     HALVING_INTERVAL,
     INITIAL_BLOCK_REWARD,
     MAX_MONEY,
+    MIN_RELAY_FEE,
     UNITS_PER_COIN,
     block_reward,
     format_units,
@@ -234,6 +238,7 @@ __all__ = [
     "MAX_TARGET",
     "MAX_TRANSACTIONS_PER_BLOCK",
     "MIN_DIFFICULTY",
+    "MIN_RELAY_FEE",
     "SIGNATURE_HEX_LENGTH",
     "TARGET_BLOCK_TIME",
     "UNITS_PER_COIN",

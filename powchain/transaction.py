@@ -1,9 +1,9 @@
-"""Transaction : structure, hash, signature, coinbase, création et validation.
+"""Transaction : structure, hash, signature, coinbase, frais, création et validation.
 
 Une Transaction est un enregistrement immuable (dataclass frozen). Deux
 champs sont dérivés des autres et ne sont jamais fournis « à la main » :
 
-* hash      : SHA-256 canonique de (sender, recipient, amount, data, sequence).
+* hash      : SHA-256 canonique de (sender, recipient, amount, fee, data, sequence).
               C'est l'IDENTITÉ de la transaction : ce qu'elle dit.
 * signature : Ed25519 des 32 octets du hash, par la clé privée dont sender
               est la clé publique. C'est l'AUTORISATION : qui l'a dit.
@@ -11,12 +11,22 @@ champs sont dérivés des autres et ne sont jamais fournis « à la main » :
 Le hash ne couvre pas la signature (Ed25519 étant déterministe, une même
 transaction n'a de toute façon qu'une seule signature valide) ; la signature
 couvre tout le hash, donc tout le contenu. L'étiquette de domaine
-"powchain/tx/v2" incluse dans le hash fait qu'une signature n'est valable
+"powchain/tx/v3" incluse dans le hash fait qu'une signature n'est valable
 que pour CE format de CETTE chaîne.
 
 Le champ sequence (numéro de séquence) est le compteur anti-rejeu du compte
 expéditeur : la n-ième transaction émise par un compte porte sequence = n-1.
 Il est signé, et vérifié contre l'état des comptes (state.py, règle S1).
+
+Frais (Partie 11)
+-----------------
+fee est ce que l'expéditeur paie EN PLUS de amount pour que sa transaction
+soit incluse dans un bloc. Il est signé (donc consenti), débité du compte
+expéditeur (state.py, règle S2) et revient au mineur du bloc par la coinbase
+(block.py, règle B7 : amount de la coinbase = récompense + somme des frais).
+La chaîne accepte tout frais >= 0 : exiger un minimum est une politique de
+relais (mempool.py, règle M5), pas une règle de la chaîne. Une coinbase ne
+paie pas de frais (fee = 0).
 
 Coinbase (Partie 4)
 -------------------
@@ -24,13 +34,13 @@ La seule façon de créer des pièces : une transaction dont sender vaut
 COINBASE_ADDRESS ("0" * 64), une adresse RÉSERVÉE à laquelle aucune clé privée
 ne correspond. Elle n'est pas signée ; ce qui l'autorise, c'est sa position
 dans un bloc miné (règle B7 de block.py : unique, en première position,
-amount = block_reward(hauteur), sequence = hauteur du bloc, ce qui rend
-chaque coinbase unique). Le mempool refuse toute coinbase soumise par un
-utilisateur, et l'état ne débite jamais COINBASE_ADDRESS.
+amount = block_reward(hauteur) + frais du bloc, sequence = hauteur du bloc, ce
+qui rend chaque coinbase unique). Le mempool refuse toute coinbase soumise par
+un utilisateur, et l'état ne débite jamais COINBASE_ADDRESS.
 
 Règles de validité (validate_transaction) :
   R1  sender et recipient sont des adresses valides (clé publique hex 64 car.)
-  R2  amount est un entier avec 0 <= amount <= MAX_MONEY
+  R2  amount et fee sont des entiers avec 0 <= valeur <= MAX_MONEY
   R3  data est une chaîne d'au plus MAX_DATA_BYTES octets UTF-8 (vide autorisée)
   R4  la transaction n'est pas « vide » : amount > 0 OU data non vide
       (exemption : une coinbase peut valoir 0 quand la récompense s'éteint)
@@ -38,7 +48,7 @@ Règles de validité (validate_transaction) :
   R6  hash est un hexadécimal canonique ET égal au hash recalculé
   R7  transaction normale : signature de 128 caractères hexadécimaux qui
       vérifie le hash avec la clé publique sender
-      coinbase : AUCUNE signature (signature == UNSIGNED)
+      coinbase : AUCUNE signature (signature == UNSIGNED) et fee = 0
 """
 
 from dataclasses import dataclass, replace
@@ -57,7 +67,7 @@ COINBASE_ADDRESS = "0" * ADDRESS_LENGTH  # adresse réservée : expéditeur des 
 
 @dataclass(frozen=True, slots=True)
 class Transaction:
-    """Transfert de amount unités de sender vers recipient, avec data optionnelle.
+    """Transfert de amount unités de sender vers recipient, moyennant fee unités au mineur.
 
     Ne pas construire directement en usage normal : passer par
     create_signed_transaction() (ou create_transaction() puis sign_transaction()),
@@ -67,6 +77,7 @@ class Transaction:
     sender: str
     recipient: str
     amount: int
+    fee: int
     data: str
     sequence: int
     hash: str
@@ -75,7 +86,7 @@ class Transaction:
     def calculate_hash(self) -> str:
         """Recalcule le hash à partir des champs réels (ignore hash et signature)."""
         return calculate_transaction_hash(
-            self.sender, self.recipient, self.amount, self.data, self.sequence
+            self.sender, self.recipient, self.amount, self.fee, self.data, self.sequence
         )
 
     def signing_message(self) -> bytes:
@@ -92,45 +103,52 @@ class Transaction:
 
 
 def calculate_transaction_hash(
-    sender: str, recipient: str, amount: int, data: str, sequence: int
+    sender: str, recipient: str, amount: int, fee: int, data: str, sequence: int
 ) -> str:
-    """SHA-256 de la sérialisation canonique : sender | recipient | amount | data | sequence."""
-    return sha256_hex(serialize_transaction_fields(sender, recipient, amount, data, sequence))
+    """SHA-256 de la sérialisation canonique : sender | recipient | amount | fee | data | sequence."""
+    return sha256_hex(serialize_transaction_fields(sender, recipient, amount, fee, data, sequence))
 
 
 def create_transaction(
-    sender: str, recipient: str, amount: int, data: str = "", sequence: int = 0
+    sender: str, recipient: str, amount: int, data: str = "", sequence: int = 0, fee: int = 0
 ) -> Transaction:
     """Transaction NON signée (signature vide) : valide seulement après sign_transaction()."""
-    _validate_content_fields(sender, recipient, amount, data, sequence)
+    _validate_content_fields(sender, recipient, amount, fee, data, sequence)
     return Transaction(
         sender=sender,
         recipient=recipient,
         amount=amount,
+        fee=fee,
         data=data,
         sequence=sequence,
-        hash=calculate_transaction_hash(sender, recipient, amount, data, sequence),
+        hash=calculate_transaction_hash(sender, recipient, amount, fee, data, sequence),
         signature=UNSIGNED,
     )
 
 
-def create_coinbase_transaction(miner_address: str, height: int, data: str = "") -> Transaction:
+def create_coinbase_transaction(
+    miner_address: str, height: int, data: str = "", fees: int = 0
+) -> Transaction:
     """Transaction de récompense du bloc de hauteur height (>= 1), payée à miner_address.
 
-    sender = COINBASE_ADDRESS, amount = block_reward(height), sequence = height,
-    signature = UNSIGNED. data est libre (message du mineur).
+    sender = COINBASE_ADDRESS, amount = block_reward(height) + fees (les frais
+    collectés dans le bloc), fee = 0, sequence = height, signature = UNSIGNED.
+    data est libre (message du mineur).
     """
     if not is_uint64(height) or height < 1:
         raise InvalidTransactionError(f"hauteur de bloc >= 1 attendue, reçu {height!r}")
-    amount = block_reward(height)
-    _validate_content_fields(COINBASE_ADDRESS, miner_address, amount, data, height)
+    if not is_valid_amount(fees):
+        raise InvalidTransactionError(f"frais collectés invalides : {fees!r}")
+    amount = block_reward(height) + fees
+    _validate_content_fields(COINBASE_ADDRESS, miner_address, amount, 0, data, height)
     return Transaction(
         sender=COINBASE_ADDRESS,
         recipient=miner_address,
         amount=amount,
+        fee=0,
         data=data,
         sequence=height,
-        hash=calculate_transaction_hash(COINBASE_ADDRESS, miner_address, amount, data, height),
+        hash=calculate_transaction_hash(COINBASE_ADDRESS, miner_address, amount, 0, data, height),
         signature=UNSIGNED,
     )
 
@@ -144,7 +162,12 @@ def sign_transaction(transaction: Transaction, key_pair: KeyPair) -> Transaction
     if transaction.is_coinbase:
         raise InvalidTransactionError("une coinbase ne se signe pas : c'est sa place dans un bloc miné qui l'autorise")
     _validate_content_fields(
-        transaction.sender, transaction.recipient, transaction.amount, transaction.data, transaction.sequence
+        transaction.sender,
+        transaction.recipient,
+        transaction.amount,
+        transaction.fee,
+        transaction.data,
+        transaction.sequence,
     )
     if key_pair.address != transaction.sender:
         raise InvalidTransactionError("la clé fournie n'est pas celle de l'expéditeur (sender)")
@@ -156,12 +179,12 @@ def sign_transaction(transaction: Transaction, key_pair: KeyPair) -> Transaction
 
 
 def create_signed_transaction(
-    key_pair: KeyPair, recipient: str, amount: int, data: str = "", sequence: int = 0
+    key_pair: KeyPair, recipient: str, amount: int, data: str = "", sequence: int = 0, fee: int = 0
 ) -> Transaction:
     """Construit et signe en une étape une transaction émise par key_pair."""
     if not isinstance(key_pair, KeyPair):
         raise InvalidTransactionError(f"KeyPair attendu, reçu {type(key_pair).__name__}")
-    unsigned = create_transaction(key_pair.address, recipient, amount, data, sequence)
+    unsigned = create_transaction(key_pair.address, recipient, amount, data, sequence, fee)
     return sign_transaction(unsigned, key_pair)
 
 
@@ -177,9 +200,9 @@ def verify_transaction_signature(transaction: object) -> bool:
 
 
 def _validate_content_fields(
-    sender: object, recipient: object, amount: object, data: object, sequence: object
+    sender: object, recipient: object, amount: object, fee: object, data: object, sequence: object
 ) -> None:
-    """Règles R1 à R5 : tout ce qui concerne le contenu, hors hash et signature."""
+    """Règles R1 à R5 (et fee = 0 pour une coinbase) : le contenu, hors hash et signature."""
     if not is_valid_address(sender):
         raise InvalidTransactionError(
             f"sender invalide : {sender!r} (clé publique hexadécimale de {ADDRESS_LENGTH} caractères attendue)"
@@ -192,6 +215,12 @@ def _validate_content_fields(
         raise InvalidTransactionError(
             f"amount invalide : {amount!r} (entier attendu entre 0 et {MAX_MONEY} unités)"
         )
+    if not is_valid_amount(fee):
+        raise InvalidTransactionError(
+            f"fee invalide : {fee!r} (entier attendu entre 0 et {MAX_MONEY} unités)"
+        )
+    if sender == COINBASE_ADDRESS and fee != 0:
+        raise InvalidTransactionError("coinbase : fee doit valoir 0 (le mineur ne se paie pas de frais)")
     if not isinstance(data, str):
         raise InvalidTransactionError(f"data invalide : chaîne attendue, reçu {type(data).__name__}")
     try:
@@ -216,7 +245,12 @@ def validate_transaction(transaction: object) -> None:
             f"objet Transaction attendu, reçu {type(transaction).__name__}"
         )
     _validate_content_fields(
-        transaction.sender, transaction.recipient, transaction.amount, transaction.data, transaction.sequence
+        transaction.sender,
+        transaction.recipient,
+        transaction.amount,
+        transaction.fee,
+        transaction.data,
+        transaction.sequence,
     )
     if not is_valid_hash_hex(transaction.hash):
         raise InvalidTransactionError(f"hash mal formé : {transaction.hash!r}")

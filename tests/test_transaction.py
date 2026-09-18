@@ -30,10 +30,10 @@ AMOUNT = 150_000_000
 # c'est que le format de sérialisation, la dérivation des clés de test ou le
 # message signé a changé : décision explicite requise.
 EXPECTED_ALICE_ADDRESS = "db72cd082d3a70ff4aad6e2ee9a9f4cdd17bca5b14b444d209a5bee6e652235d"
-EXPECTED_ALICE_TO_BOB_HASH = "2967b564729a0e8e5dbce78d406a5d2df9dde990c88fa87da1aebd38b005c9bf"
+EXPECTED_ALICE_TO_BOB_HASH = "8f83bdc03deee1b2cb57258de3a9fe3f36862489fc8c16ef3bf70c7a295df3c8"
 EXPECTED_ALICE_TO_BOB_SIGNATURE = (
-    "1ef2bde9a439c0847dc169b81ceababfd07fa74d84e521e4be141c1b7d9712f3"
-    "1b6bffe815ec62f8017d19c43e3bf0c6dca649ba88c6f0f21d3f2a1b07369708"
+    "2d34ad62f2742d7b49319941c9a0747dcc317e23ba633da923674decc24fe2ec"
+    "740e89eecb6e2eafd10ec1564ba1bdc910dafd3e617c384b07d6007808b1600e"
 )
 
 
@@ -78,7 +78,7 @@ class TransactionHashTests(unittest.TestCase):
 
     def test_function_and_method_agree(self):
         tx = signed_tx(ALICE, BOB, AMOUNT, "x", sequence=9)
-        self.assertEqual(tx.hash, calculate_transaction_hash(ALICE.address, BOB.address, AMOUNT, "x", 9))
+        self.assertEqual(tx.hash, calculate_transaction_hash(ALICE.address, BOB.address, AMOUNT, 0, "x", 9))
         self.assertEqual(tx.hash, tx.calculate_hash())
         self.assertEqual(tx.signing_message(), bytes.fromhex(tx.hash))
 
@@ -205,9 +205,9 @@ class ValidateTransactionTests(unittest.TestCase):
                 self.assertFalse(verify_transaction_signature(bad))
 
     def test_direct_construction_with_bad_types(self):
-        self.assertFalse(is_valid_transaction(Transaction(1, 2, 3, 4, 5, 6, 7)))
-        self.assertFalse(verify_transaction_signature(Transaction(1, 2, 3, 4, 5, 6, 7)))
-        bad = Transaction(ALICE.address, BOB.address, 1.0, "", 0, "0" * 64, "0" * 128)
+        self.assertFalse(is_valid_transaction(Transaction(1, 2, 3, 4, 5, 6, 7, 8)))
+        self.assertFalse(verify_transaction_signature(Transaction(1, 2, 3, 4, 5, 6, 7, 8)))
+        bad = Transaction(ALICE.address, BOB.address, 1.0, 0, "", 0, "0" * 64, "0" * 128)
         self.assertFalse(is_valid_transaction(bad))
 
 

@@ -69,3 +69,12 @@ def block_reward(height: int) -> int:
     if not isinstance(height, int) or isinstance(height, bool) or height < 1:
         raise ValueError(f"hauteur de bloc >= 1 attendue, reçu {height!r}")
     return INITIAL_BLOCK_REWARD >> (height // HALVING_INTERVAL)
+
+
+# Frais de transaction (Partie 11). L'expéditeur paie fee unités EN PLUS du
+# montant ; ces frais reviennent au mineur du bloc par sa coinbase. La chaîne
+# accepte tout frais >= 0 ; le seuil ci-dessous est une POLITIQUE DE RELAIS
+# (mempool.py, règle M5) : en dessous, un nœud n'attend ni ne relaie la
+# transaction. 0.0001 COIN : négligeable pour un usage normal, dissuasif pour
+# qui voudrait inonder le réseau de milliers de transactions.
+MIN_RELAY_FEE = 10_000

@@ -7,8 +7,8 @@ qui circule) et découpable sans ambiguïté (readline).
 
 Enveloppe :  {"type": "<nom du message>", "payload": {...}}
 
-Catalogue (PROTOCOL_VERSION = 1)
---------------------------------
+Catalogue (PROTOCOL_VERSION = 2 : transactions avec frais, Partie 11)
+--------------------------------------------------------------------
     hello            premier message de CHAQUE côté d'une connexion :
                      node_id, version, listen_port (ou null si le pair
                      n'accepte pas de connexions entrantes, ex. un client
@@ -49,7 +49,7 @@ from dataclasses import dataclass, field
 
 from .errors import ProtocolError
 
-PROTOCOL_VERSION = 1
+PROTOCOL_VERSION = 2
 
 MAX_MESSAGE_BYTES = 16 * 1024 * 1024  # 16 Mio par ligne, blocs compris
 MAX_BLOCKS_PER_MESSAGE = 200

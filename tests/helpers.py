@@ -28,9 +28,9 @@ MINER = test_key("miner")
 
 
 def signed_tx(
-    sender: KeyPair, recipient: KeyPair, amount: int, data: str = "", sequence: int = 0
+    sender: KeyPair, recipient: KeyPair, amount: int, data: str = "", sequence: int = 0, fee: int = 0
 ) -> Transaction:
-    return create_signed_transaction(sender, recipient.address, amount, data, sequence)
+    return create_signed_transaction(sender, recipient.address, amount, data, sequence, fee)
 
 
 def coins(count: int) -> int:

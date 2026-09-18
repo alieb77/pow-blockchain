@@ -20,7 +20,7 @@ def funded_state():
 class MempoolResyncTests(unittest.TestCase):
     def setUp(self):
         self.state = funded_state()
-        self.pool = Mempool()
+        self.pool = Mempool(min_fee=0)  # les frais (Partie 11) sont testés dans test_fees.py
 
     def test_resync_keeps_pending_and_readmits_extra_in_order(self):
         first = signed_tx(MINER, ALICE, coins(1), sequence=0)
@@ -40,7 +40,7 @@ class MempoolResyncTests(unittest.TestCase):
         self.assertEqual(len(self.pool), 0)
 
     def test_resync_respects_capacity_and_validity(self):
-        pool = Mempool(max_size=1)
+        pool = Mempool(max_size=1, min_fee=0)
         extra = (
             signed_tx(MINER, ALICE, coins(1), sequence=0),
             signed_tx(MINER, BOB, coins(1), sequence=1),
@@ -56,7 +56,7 @@ class MempoolResyncTests(unittest.TestCase):
 class MempoolAdmissionTests(unittest.TestCase):
     def setUp(self):
         self.state = funded_state()
-        self.pool = Mempool()
+        self.pool = Mempool(min_fee=0)  # les frais (Partie 11) sont testés dans test_fees.py
 
     def test_add_valid_transaction(self):
         tx = signed_tx(MINER, ALICE, coins(1))
@@ -116,7 +116,7 @@ class MempoolAdmissionTests(unittest.TestCase):
         self.assertEqual(len(self.pool), 2)
 
     def test_full_mempool(self):
-        pool = Mempool(max_size=1)
+        pool = Mempool(max_size=1, min_fee=0)
         pool.add(signed_tx(MINER, ALICE, coins(1), sequence=0), self.state)
         with self.assertRaisesRegex(MempoolError, "plein"):
             pool.add(signed_tx(MINER, BOB, coins(1), sequence=1), self.state)
@@ -131,7 +131,7 @@ class MempoolAdmissionTests(unittest.TestCase):
 class MempoolSelectionTests(unittest.TestCase):
     def setUp(self):
         self.state = funded_state()
-        self.pool = Mempool()
+        self.pool = Mempool(min_fee=0)  # les frais (Partie 11) sont testés dans test_fees.py
         self.tx_a = signed_tx(MINER, ALICE, coins(10), sequence=0)
         self.tx_b = signed_tx(MINER, BOB, coins(5), sequence=1)
         self.tx_c = signed_tx(ALICE, CAROL, coins(4), sequence=0)
