@@ -11,7 +11,10 @@ Hiérarchie :
     │   └── InvalidChainError
     ├── MiningError               le minage n'a pas pu produire de preuve de travail
     │   └── MiningLimitError      la limite d'essais demandée a été atteinte
-    └── MempoolError              refus propre à la file d'attente (plein, doublon, coinbase)
+    ├── MempoolError              refus propre à la file d'attente (plein, doublon, coinbase)
+    ├── CodecError                un dictionnaire JSON ne décrit pas une Transaction / un Block
+    └── ProtocolError             un message réseau est mal formé (type inconnu, champ manquant,
+                                  taille excessive...)
 
 Chaque exception porte un message explicite décrivant la règle violée :
 les fonctions is_valid_*() les convertissent en booléen, les fonctions
@@ -58,3 +61,16 @@ class MempoolError(PowChainError):
     lèvent InvalidTransactionError ; MempoolError couvre le reste : file
     pleine, doublon, coinbase soumise par un utilisateur.
     """
+
+
+class CodecError(PowChainError):
+    """Un dictionnaire (issu de JSON) ne décrit pas une transaction ou un bloc bien formé.
+
+    Décoder n'est pas valider : un objet décodé sans CodecError a les bons
+    champs et les bons types, mais ses règles métier (hash, signature,
+    preuve de travail...) restent à vérifier par validate_*().
+    """
+
+
+class ProtocolError(PowChainError):
+    """Un message réseau viole le protocole (enveloppe, type, champs, taille)."""

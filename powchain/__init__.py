@@ -5,6 +5,9 @@ blocs, bloc Genesis et validation d'intégrité de la chaîne.
 Partie 2 : preuve de travail (cible, difficulté, ajustement), minage, travail cumulé.
 Partie 3 : clés Ed25519, adresses = clés publiques, transactions signées et vérifiées.
 Partie 4 : état des comptes (soldes, séquences), coinbase et émission, mempool.
+Partie 5 : réseau pair-à-pair : codec JSON, protocole, nœud (gossip,
+synchronisation, règle du plus grand travail, borne d'horloge), transport
+asyncio, réseau simulé, ligne de commande (python -m powchain).
 
 Ce module ré-exporte l'API publique pour permettre d'écrire simplement :
 
@@ -29,8 +32,10 @@ from .block import (
     validate_block,
 )
 from .chain import Blockchain, chain_work, compute_state, is_valid_chain, validate_chain
+from .codec import block_from_dict, block_to_dict, transaction_from_dict, transaction_to_dict
 from .crypto import HASH_HEX_LENGTH, is_valid_hash_hex, sha256_hex
 from .errors import (
+    CodecError,
     InvalidBlockError,
     InvalidChainError,
     InvalidTransactionError,
@@ -38,6 +43,7 @@ from .errors import (
     MiningError,
     MiningLimitError,
     PowChainError,
+    ProtocolError,
     SerializationError,
     ValidationError,
 )
@@ -50,6 +56,8 @@ from .keys import (
 )
 from .mempool import DEFAULT_MAX_SIZE, Mempool
 from .mining import MiningResult, mine_block
+from .network import NodeServer
+from .node import MAX_FUTURE_DRIFT_SECONDS, MAX_PEERS, Connect, Disconnect, Node, Peer, Send
 from .money import (
     COIN_SYMBOL,
     HALVING_INTERVAL,
@@ -75,6 +83,8 @@ from .proof_of_work import (
     is_valid_difficulty,
     target_from_difficulty,
 )
+from .protocol import PROTOCOL_VERSION, Message, decode_message, encode_message, message
+from .simulation import FakeClock, SimulatedNetwork
 from .state import Account, State
 from .transaction import (
     COINBASE_ADDRESS,
@@ -91,13 +101,34 @@ from .transaction import (
     verify_transaction_signature,
 )
 
-__version__ = "0.4.0"
+__version__ = "0.5.0"
 
 __all__ = [
     "ADDRESS_LENGTH",
     "ADJUSTMENT_DIVISOR",
     "COINBASE_ADDRESS",
     "COIN_SYMBOL",
+    "Connect",
+    "CodecError",
+    "Disconnect",
+    "FakeClock",
+    "MAX_FUTURE_DRIFT_SECONDS",
+    "MAX_PEERS",
+    "Message",
+    "Node",
+    "NodeServer",
+    "PROTOCOL_VERSION",
+    "Peer",
+    "ProtocolError",
+    "Send",
+    "SimulatedNetwork",
+    "block_from_dict",
+    "block_to_dict",
+    "decode_message",
+    "encode_message",
+    "message",
+    "transaction_from_dict",
+    "transaction_to_dict",
     "DEFAULT_MAX_SIZE",
     "GENESIS_DIFFICULTY",
     "GENESIS_INDEX",

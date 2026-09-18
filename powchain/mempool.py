@@ -23,6 +23,11 @@ Cycle de vie côté mineur :
     block = mine_block(create_block(chain.last_block, txs, miner)).block
     chain.add_block(block)
     mempool.remove_confirmed(block, chain.state)           # purge et re-validation
+
+Réorganisation (Partie 5) : quand un nœud abandonne sa branche pour une
+chaîne plus lourde, les transactions des blocs abandonnés redeviennent
+« en attente » et tout le mempool est re-validé contre le nouvel état :
+    mempool.resync(new_state, extra=transactions_des_blocs_abandonnés)
 """
 
 from .block import MAX_TRANSACTIONS_PER_BLOCK, Block
@@ -118,6 +123,35 @@ class Mempool:
                 dropped.append(transaction)
                 continue
             kept[tx_hash] = transaction
+        self._pending = kept
+        return tuple(dropped)
+
+
+    def resync(self, state: State, extra: tuple[Transaction, ...] = ()) -> tuple[Transaction, ...]:
+        """Rejoue l'admission de toutes les transactions en attente PUIS de extra sur state.
+
+        Sert après une réorganisation de chaîne : state est le nouvel état,
+        extra les transactions des blocs abandonnés (elles gardent leur
+        chance d'être confirmées sur la nouvelle branche). Tout ce qui n'est
+        plus applicable (déjà confirmé ailleurs, solde disparu) est purgé ;
+        retourne les transactions purgées.
+        """
+        projected = _require_state(state)
+        kept: dict[str, Transaction] = {}
+        dropped: list[Transaction] = []
+        for transaction in tuple(self._pending.values()) + tuple(extra):
+            if transaction.hash in kept or transaction.is_coinbase:
+                continue
+            try:
+                validate_transaction(transaction)
+                projected = projected.apply_transaction(transaction)
+            except InvalidTransactionError:
+                dropped.append(transaction)
+                continue
+            if len(kept) >= self._max_size:
+                dropped.append(transaction)
+                continue
+            kept[transaction.hash] = transaction
         self._pending = kept
         return tuple(dropped)
 

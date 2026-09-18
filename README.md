@@ -1,12 +1,14 @@
-# powchain — Parties 1 à 4 : hashes, preuve de travail, signatures, soldes et mempool
+# powchain — Parties 1 à 5 : hashes, preuve de travail, signatures, soldes, mempool, réseau P2P
 
 Blockchain Proof of Work construite pas à pas en Python (3.10 ou plus récent).
 Une seule dépendance externe, `cryptography`, pour les signatures Ed25519.
+Le réseau n'utilise que la bibliothèque standard (`asyncio`, `json`).
 
-> Ce projet n'est **pas** encore une blockchain décentralisée. Les Parties 1
-> à 4 fournissent une chaîne minée et vérifiable en local, avec des
-> transactions signées, des soldes, une récompense de minage et une file
-> d'attente. Le réseau P2P, le wallet et les packs de jeu viendront ensuite.
+> Depuis la Partie 5, plusieurs nœuds peuvent tourner dans plusieurs
+> terminaux (ou machines d'un même réseau local), s'échanger transactions et
+> blocs, se rattraper et résoudre les forks par la règle du plus grand
+> travail cumulé. Le wallet, la persistance sur disque, les frais et les packs
+> de jeu viendront ensuite.
 
 ## Installer et lancer
 
@@ -14,19 +16,56 @@ Une seule dépendance externe, `cryptography`, pour les signatures Ed25519.
 pip install -r requirements.txt
 ```
 
+Démonstration complète (Parties 1 à 5, dont un réseau simulé et de vraies sockets) :
+
 ```bash
 python main.py
 ```
+
+Tests (310, environ 6 s ; une dizaine utilisent de vraies sockets locales) :
 
 ```bash
 python -m unittest -v
 ```
 
+### Faire tourner des nœuds dans plusieurs terminaux
+
+Terminal 1 : générer une clé, puis lancer un nœud qui mine pour elle.
+
+```bash
+python -m powchain keygen
+```
+
+```bash
+python -m powchain node --port 5000 --mine <adresse affichée par keygen>
+```
+
+Terminal 2 : un second nœud qui rejoint le premier (il rattrape la chaîne, puis reçoit chaque nouveau bloc).
+
+```bash
+python -m powchain node --port 5001 --peers 127.0.0.1:5000
+```
+
+Terminal 3 : interroger un nœud, puis payer depuis la clé du mineur (la transaction voyage jusqu'au mineur, qui l'inclut dans un bloc).
+
+```bash
+python -m powchain status --node 127.0.0.1:5001 --address <adresse>
+```
+
+```bash
+python -m powchain send --node 127.0.0.1:5001 --seed-hex <graine de keygen> --to <adresse destinataire> --amount 2.5
+```
+
+`send` demande au nœud la prochaine séquence du compte, signe, envoie, puis
+affiche le solde projeté ; un refus (solde insuffisant, rejeu) est motivé.
+Un troisième nœud lancé avec `--peers 127.0.0.1:5001` découvrira le premier
+tout seul (échange d'adresses).
+
 ## Arborescence
 
 ```
 pow-blockchain/
-├── main.py                  démonstration : clés, coinbase, mempool, attaques, émission
+├── main.py                  démonstration : clés, coinbase, mempool, attaques, émission, réseau P2P
 ├── requirements.txt         cryptography>=42
 ├── powchain/
 │   ├── errors.py            hiérarchie d'exceptions
@@ -40,12 +79,22 @@ pow-blockchain/
 │   ├── block.py             Block, Genesis, create_block (coinbase en tête), règles B1-B7
 │   ├── mining.py            mine_block : recherche du nonce
 │   ├── state.py             State immuable : soldes, séquences, règles S1-S3
-│   ├── mempool.py           Mempool : file d'attente validée contre l'état projeté (M1-M4)
-│   └── chain.py             Blockchain (blocs + état), validate_chain, compute_state, chain_work
-└── tests/                   201 tests unittest (~1 s) ; helpers.py = clés de test déterministes
+│   ├── mempool.py           Mempool : file d'attente validée contre l'état projeté (M1-M4), resync
+│   ├── chain.py             Blockchain (blocs + état + index par hash), validate_chain, chain_work
+│   ├── codec.py             Transaction / Block <-> dictionnaires JSON (transport et futur stockage)
+│   ├── protocol.py          catalogue des messages, enveloppe JSON, une ligne par message
+│   ├── node.py              Node : logique P2P PURE (gossip, synchronisation, forks, règle N1)
+│   ├── network.py           NodeServer : sockets TCP asyncio + minage par tranches
+│   ├── simulation.py        SimulatedNetwork / FakeClock : plusieurs nœuds en mémoire, déterministe
+│   └── __main__.py          ligne de commande : node, keygen, status, send
+└── tests/                   310 tests unittest ; helpers.py = clés de test déterministes
 ```
 
 Chaque module ne dépend que de ceux situés au-dessus de lui dans cette liste.
+`node.py` ne touche jamais à une socket : il reçoit des messages et renvoie
+des actions (`Send`, `Connect`, `Disconnect`) que `network.py` (vraies
+sockets) ou `simulation.py` (en mémoire) exécutent. C'est ce qui permet de
+tester les forks et les réorganisations de façon déterministe.
 
 ## Conventions (à connaître avant d'écrire du code)
 
@@ -60,9 +109,11 @@ Chaque module ne dépend que de ceux situés au-dessus de lui dans cette liste.
 | Coinbase | transaction dont `sender` est l'adresse réservée `"0"*64`, non signée, `sequence` = hauteur du bloc, `amount` = `block_reward(hauteur)` |
 | Récompense | 50 COIN, divisée par deux tous les 210 000 blocs ; total < 21 M COIN |
 | `data` | chaîne UTF-8 opaque de 1024 octets max ; réservée aux futures métadonnées de packs |
-| Timestamp | entier, secondes Unix UTC ; strictement croissant d'un bloc au suivant |
+| Timestamp | entier, secondes Unix UTC ; strictement croissant d'un bloc au suivant ; au plus 120 s dans le futur pour être relayé (règle N1) |
 | Difficulté | entier `>= 1` stocké dans l'en-tête et hashé ; cible `= (2^256 - 1) // difficulté` |
 | Genesis | `index 0`, `timestamp 1767225600`, aucune transaction (donc aucune pièce), `difficulty 4096`, `nonce 5237`, hash `000cb9d4…facd` figé par un test |
+| Message réseau | un objet JSON `{"type", "payload"}` par ligne, 16 Mio max ; `PROTOCOL_VERSION = 1` |
+| Adresse réseau | `hôte:port` ; un nœud écoute sur `--port`, un client éphémère annonce `listen_port: null` |
 
 ## Format canonique (ce qui est réellement hashé)
 
@@ -80,7 +131,13 @@ Bloc        : "powchain/block/v2"  | index | timestamp | transactions_hash | pre
 Ni le hash ni la signature d'une transaction n'entrent dans son propre hash.
 La signature est calculée **sur** le hash et couvre donc tout le contenu.
 
-## Cycle de vie complet
+Le format JSON de `codec.py` est distinct : il transporte l'objet **complet**
+(signature comprise, transactions d'un bloc incluses) et sert au réseau ; il
+servira aussi au stockage sur disque. Décoder n'est pas valider : un objet
+décodé passe ensuite par `validate_transaction` / `validate_block` comme
+n'importe quel autre.
+
+## Cycle de vie complet (en local)
 
 ```python
 miner, alice = KeyPair.generate(), KeyPair.generate()
@@ -99,6 +156,77 @@ pool.remove_confirmed(block, chain.state)
 
 chain.state.balance_of(alice.address)      # 1_000_000_000 unités = 10 COIN
 ```
+
+## Le réseau pair-à-pair (Partie 5)
+
+### Ce qu'un nœud fait
+
+1. **Poignée de main.** Chaque côté d'une connexion envoie `hello` en premier :
+   `node_id`, version, port d'écoute, hauteur, travail cumulé, hash de la pointe.
+   Un `node_id` égal au nôtre (connexion à soi-même) ou déjà connecté (doublon),
+   une version inconnue, ou tout message avant `hello` : connexion fermée.
+2. **Découverte.** Après `hello`, chaque nœud envoie les adresses qu'il connaît
+   (`peers`) ; le destinataire se connecte aux inconnues tant qu'il a moins de
+   `MAX_PEERS` (8) connexions. `--peers` ne sert donc qu'à amorcer.
+3. **Gossip des transactions.** `new_transaction` : admise dans le mempool
+   (M1-M4) puis renvoyée à tous les autres pairs. Une transaction déjà connue
+   n'est pas relayée : la rumeur s'éteint d'elle-même. Un refus vaut un
+   `reject` motivé à l'expéditeur, sans déconnexion.
+4. **Gossip des blocs.** `new_block` qui prolonge notre pointe : validé
+   (B1-B7, S1-S3, N1), ajouté, mempool purgé, relayé aux autres. Déjà connu :
+   ignoré. Invalide : pair déconnecté (un bloc miné invalide n'est jamais un
+   accident).
+5. **Synchronisation.** Un bloc qui ne prolonge pas notre pointe, ou un
+   `hello` annonçant plus de travail, déclenche `get_blocks` à partir de
+   `min(notre hauteur + 1, hauteur du pair)`. Une seule synchronisation à la
+   fois. Si le premier bloc reçu ne se greffe pas sur notre chaîne, on
+   redemande plus bas (recul 1, 2, 4, 8… jusqu'au bloc 1). Les lots de 200
+   blocs s'enchaînent (`has_more`) jusqu'à la pointe du pair.
+6. **Évaluation de la branche.** Candidate = nos blocs jusqu'au point de
+   divergence + blocs reçus. Travail cumulé (`chain_work`) pas plus grand que le
+   nôtre : ignorée. Prolongement de notre pointe : ajout bloc par bloc. Sinon
+   **réorganisation** : revalidation complète depuis le Genesis
+   (`Blockchain.from_blocks`), remplacement, et les transactions des blocs
+   abandonnés retournent au mempool (`Mempool.resync`).
+7. **Minage.** Le nœud assemble un candidat sur sa pointe avec le mempool et
+   mine par tranches de 4096 essais dans la boucle `asyncio`, en rendant la
+   main au réseau entre deux tranches. Un bloc arrivé d'un pair rend le
+   candidat périmé : il est reconstruit sur la nouvelle pointe. Le timestamp
+   est rafraîchi à chaque seconde pour que la difficulté reflète le temps réel.
+
+### Règles
+
+- **Consensus : la chaîne au plus grand travail cumulé l'emporte**, pas la
+  plus longue. À travail égal, on garde la sienne (première vue). Comme la
+  difficulté suit les timestamps, une chaîne plus longue de blocs lents peut
+  peser moins qu'une chaîne plus courte de blocs rapides (démo 6d).
+- **N1, borne d'horloge :** un bloc daté de plus de `MAX_FUTURE_DRIFT_SECONDS`
+  (120 s, soit 12 fois le temps de bloc, même ratio que Bitcoin) dans le futur
+  est refusé, sans déconnexion, et pourra être accepté plus tard. Sans elle,
+  un mineur daterait ses blocs dans le futur pour obtenir -12,5 % de difficulté
+  à chaque bloc. C'est une règle **réseau**, pas une règle de la chaîne : elle
+  dépend de l'heure à laquelle on regarde le bloc.
+- Un pair qui envoie un message hors protocole, un bloc invalide, un lot de
+  blocs incohérent ou une chaîne sans ancêtre commun (Genesis différent) est
+  déconnecté. Un pair dont la branche est simplement plus légère ne l'est pas.
+
+### Messages (`protocol.py`)
+
+| Type | Payload | Rôle |
+|---|---|---|
+| `hello` | `node_id, version, listen_port, height, work, tip_hash` | premier message de chaque côté |
+| `peers` | `addresses: ["hôte:port", …]` | découverte |
+| `new_transaction` | `transaction` | gossip |
+| `new_block` | `block` | gossip |
+| `get_blocks` | `from_index` | synchronisation |
+| `blocks` | `blocks: [...], has_more` | réponse, paginée par 200 |
+| `get_account` | `address` | client / wallet |
+| `account` | `balance, next_sequence, projected_balance, projected_next_sequence, height` | réponse |
+| `reject` | `hash, reason` | transaction refusée |
+
+Un nœud ne fait aucune différence entre un pair et un client éphémère
+(`status`, `send`) : mêmes messages, mêmes règles, aucune confiance accordée
+au contenu reçu.
 
 ## Règles de validation
 
@@ -132,9 +260,12 @@ chain.state.balance_of(alice.address)      # 1_000_000_000 unités = 10 COIN
 **Mempool** (`Mempool.add(tx, state)`) : M1 valide et pas une coinbase ; M2 pas de
 doublon ; M3 applicable sur l'état projeté (état + transactions en attente) ;
 M4 capacité. Service dans l'ordre d'arrivée, pas encore de frais.
+`resync(state, extra)` rejoue tout après une réorganisation.
 
 **Chaîne** (`validate_chain`) : Genesis canonique, puis chaque bloc validé
 contre le précédent ET appliqué à l'état. `compute_state` renvoie l'état final.
+
+**Réseau** (`Node`) : N1 borne d'horloge ; consensus par travail cumulé.
 
 ## Ce qui est construit et fonctionne
 
@@ -144,14 +275,20 @@ contre le précédent ET appliqué à l'état. `compute_state` renvoie l'état f
 - Mempool avec état projeté : un paiement en attente peut en financer un autre.
 - Détection de toute falsification : hash, signature, preuve de travail, rejeu,
   découvert, double dépense, récompense gonflée (section 4 de `main.py`).
+- Nœuds en réseau : découverte, gossip, rattrapage paginé, forks résolus par le
+  travail cumulé avec réorganisation et retour des transactions au mempool,
+  borne d'horloge, déconnexion des pairs fautifs (sections 6 et 7 de `main.py`,
+  `python -m powchain`).
 
 ## Ce qui n'est pas encore implémenté, et pourquoi plus tard
 
 | Fonctionnalité | Pourquoi elle attend |
 |---|---|
-| Réseau P2P, chaîne concurrente | `chain_work` est prêt ; il faut des nœuds qui échangent blocs et transactions, la règle « plus grand travail cumulé gagne » et la borne d'avance d'horloge. |
-| Frais de transaction | Sans frais, le mempool sert dans l'ordre d'arrivée ; les frais donneraient au mineur une raison d'inclure une transaction plutôt qu'une autre. |
-| Persistance sur disque | La chaîne vit en mémoire ; l'enregistrer permettra de redémarrer un nœud. |
-| Wallet | Chiffrement des clés sur disque, suivi automatique des séquences, somme de contrôle des adresses. |
+| Persistance sur disque | La chaîne vit en mémoire ; le codec JSON est prêt, il reste à écrire/charger un fichier et à reprendre au redémarrage. |
+| Wallet | Chiffrement des clés sur disque, suivi automatique des séquences, somme de contrôle des adresses. `send --seed-hex` est un pis-aller. |
+| Frais de transaction | Sans frais, le mempool sert dans l'ordre d'arrivée ; les frais donneraient au mineur une raison d'inclure une transaction plutôt qu'une autre et protégeraient le réseau du spam. |
+| Reconnexion, bannissement | Un pair perdu n'est pas rappelé ; un pair fautif est déconnecté mais peut revenir. Il manque un score de mauvaise conduite et une liste noire temporaire. |
+| Synchronisation par en-têtes | Un fork profond se cherche par recul géométrique et la branche est revalidée entièrement ; Bitcoin échange d'abord des en-têtes (block locator). Acceptable tant que les chaînes sont courtes. |
 | Logique des packs de jeu | Le champ `data` et le modèle de comptes sont prêts ; un pack sera un enregistrement attaché à un compte. |
+| Attaque majoritaire | Limite intrinsèque de la preuve de travail : qui contrôle la majorité de la puissance de calcul peut réécrire l'historique (démo 6g). La parade est le nombre de confirmations, pas le code. |
 | Sécurité de la clé privée | Limite intrinsèque : une clé volée permet de signer au nom de son propriétaire, dans la limite de son solde. |

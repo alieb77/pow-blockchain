@@ -76,14 +76,16 @@ class Blockchain:
     def __init__(self) -> None:
         self._blocks: list[Block] = [create_genesis_block()]
         self._state = State()
+        self._index_by_hash: dict[str, int] = {self._blocks[0].hash: 0}
 
     @classmethod
     def from_blocks(cls, blocks: Sequence[Block]) -> "Blockchain":
-        """Reconstruit une chaîne (ex. chargée depuis un fichier) après validation complète."""
+        """Reconstruit une chaîne (reçue d'un pair, chargée d'un fichier) après validation complète."""
         state = _replay(blocks)
         chain = cls()
         chain._blocks = list(blocks)
         chain._state = state
+        chain._index_by_hash = {block.hash: block.index for block in chain._blocks}
         return chain
 
     @property
@@ -104,6 +106,32 @@ class Blockchain:
         return len(self._blocks)
 
     @property
+    def height(self) -> int:
+        """Index du dernier bloc (le Genesis seul donne 0)."""
+        return self._blocks[-1].index
+
+    def block_at(self, index: int) -> Block | None:
+        """Bloc d'index donné, ou None s'il n'existe pas (encore)."""
+        if isinstance(index, bool) or not isinstance(index, int) or not 0 <= index < len(self._blocks):
+            return None
+        return self._blocks[index]
+
+    def index_of(self, block_hash: str) -> int | None:
+        """Index du bloc portant ce hash, ou None si la chaîne ne le contient pas."""
+        return self._index_by_hash.get(block_hash)
+
+    def __contains__(self, item: object) -> bool:
+        """`block in chain` ou `hash in chain` : vrai si ce bloc fait partie de la chaîne."""
+        key = item.hash if isinstance(item, Block) else item
+        return key in self._index_by_hash
+
+    def blocks_from(self, from_index: int, limit: int) -> tuple[Block, ...]:
+        """Au plus limit blocs consécutifs à partir de from_index (vide si hors chaîne)."""
+        if not isinstance(from_index, int) or isinstance(from_index, bool) or from_index < 0 or limit < 0:
+            return ()
+        return tuple(self._blocks[from_index : from_index + limit])
+
+    @property
     def total_work(self) -> int:
         """Travail cumulé de la chaîne (voir chain_work)."""
         return chain_work(self._blocks)
@@ -117,6 +145,7 @@ class Blockchain:
         new_state = self._state.apply_block(block)
         self._blocks.append(block)
         self._state = new_state
+        self._index_by_hash[block.hash] = block.index
 
     def validate(self) -> None:
         """Lève InvalidChainError si la chaîne n'est plus intègre."""

@@ -60,6 +60,39 @@ def forge_payment_to_alice(block2, factor, signer=None):
     return replace(block2, transactions=(coinbase, forged, to_bob))
 
 
+class BlockchainLookupTests(unittest.TestCase):
+    def test_lookups_by_index_and_hash(self):
+        chain = Blockchain.from_blocks(build_blocks())
+        self.assertEqual(chain.height, 3)
+        self.assertEqual(chain.block_at(2), chain.blocks[2])
+        self.assertIsNone(chain.block_at(4))
+        self.assertIsNone(chain.block_at(-1))
+        self.assertIsNone(chain.block_at(True))
+        self.assertEqual(chain.index_of(chain.blocks[3].hash), 3)
+        self.assertIsNone(chain.index_of("f" * 64))
+        self.assertIn(chain.blocks[1], chain)
+        self.assertIn(chain.blocks[1].hash, chain)
+        self.assertNotIn("f" * 64, chain)
+
+    def test_lookups_follow_add_block(self):
+        genesis, block1, block2, block3 = build_blocks()
+        chain = Blockchain()
+        self.assertEqual(chain.height, 0)
+        self.assertNotIn(block1, chain)
+        chain.add_block(block1)
+        self.assertIn(block1, chain)
+        self.assertEqual(chain.index_of(block1.hash), 1)
+        self.assertEqual(chain.height, 1)
+
+    def test_blocks_from(self):
+        chain = Blockchain.from_blocks(build_blocks())
+        self.assertEqual(chain.blocks_from(1, 2), chain.blocks[1:3])
+        self.assertEqual(chain.blocks_from(3, 10), chain.blocks[3:])
+        self.assertEqual(chain.blocks_from(4, 10), ())
+        self.assertEqual(chain.blocks_from(-1, 10), ())
+        self.assertEqual(chain.blocks_from(0, 0), ())
+
+
 class ValidateChainTests(unittest.TestCase):
     def test_valid_chain(self):
         blocks = build_blocks()

@@ -17,6 +17,42 @@ def funded_state():
     return State().apply_transaction(create_coinbase_transaction(MINER.address, 1))
 
 
+class MempoolResyncTests(unittest.TestCase):
+    def setUp(self):
+        self.state = funded_state()
+        self.pool = Mempool()
+
+    def test_resync_keeps_pending_and_readmits_extra_in_order(self):
+        first = signed_tx(MINER, ALICE, coins(1), sequence=0)
+        self.pool.add(first, self.state)
+        second = signed_tx(MINER, BOB, coins(1), sequence=1)
+        dropped = self.pool.resync(self.state, (second, first))  # first en double : ignorée
+        self.assertEqual(dropped, ())
+        self.assertEqual(self.pool.transactions, (first, second))
+
+    def test_resync_drops_what_the_new_state_refuses(self):
+        pending = signed_tx(MINER, ALICE, coins(1), sequence=0)
+        self.pool.add(pending, self.state)
+        confirmed_elsewhere = signed_tx(MINER, BOB, coins(1), sequence=0)
+        new_state = self.state.apply_transaction(confirmed_elsewhere)
+        dropped = self.pool.resync(new_state, (confirmed_elsewhere, create_coinbase_transaction(ALICE.address, 3)))
+        self.assertEqual(dropped, (pending, confirmed_elsewhere))  # rejeu de séquence 0, et coinbase ignorée
+        self.assertEqual(len(self.pool), 0)
+
+    def test_resync_respects_capacity_and_validity(self):
+        pool = Mempool(max_size=1)
+        extra = (
+            signed_tx(MINER, ALICE, coins(1), sequence=0),
+            signed_tx(MINER, BOB, coins(1), sequence=1),
+            create_transaction(MINER.address, ALICE.address, 1, sequence=2),  # non signée
+        )
+        dropped = pool.resync(self.state, extra)
+        self.assertEqual(pool.transactions, extra[:1])
+        self.assertEqual(dropped, extra[1:])
+        with self.assertRaises(TypeError):
+            pool.resync("state")
+
+
 class MempoolAdmissionTests(unittest.TestCase):
     def setUp(self):
         self.state = funded_state()

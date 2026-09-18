@@ -1,41 +1,54 @@
-"""Démonstration des Parties 1 à 4 : hashes, preuve de travail, signatures, soldes et mempool.
+"""Démonstration des Parties 1 à 5 : hashes, preuve de travail, signatures, soldes, mempool, réseau P2P.
 
 Lancer depuis le dossier du projet :
 
     python main.py
 
 Le programme génère des clés, fait miner un premier bloc (création monétaire),
-fait circuler les pièces via le mempool, puis simule des attaques : rejeu,
-récompense gonflée, dépense au-delà du solde, double dépense.
+fait circuler les pièces via le mempool, simule des attaques (rejeu,
+récompense gonflée, dépense au-delà du solde, double dépense), puis fait
+vivre plusieurs nœuds : d'abord sur un réseau simulé et déterministe (forks,
+règle du plus grand travail, borne d'horloge, attaque majoritaire), enfin sur
+de vraies sockets TCP locales.
 """
 
+import asyncio
 import sys
 from dataclasses import replace
 from datetime import datetime, timezone
 
 from powchain import (
+    GENESIS_TIMESTAMP,
     HALVING_INTERVAL,
+    MAX_FUTURE_DRIFT_SECONDS,
     TARGET_BLOCK_TIME,
     Block,
     Blockchain,
+    FakeClock,
     InvalidChainError,
     InvalidTransactionError,
     KeyPair,
     Mempool,
     MempoolError,
+    Node,
+    NodeServer,
+    SimulatedNetwork,
     State,
     Transaction,
     block_reward,
+    block_to_dict,
     create_block,
     create_coinbase_transaction,
     create_signed_transaction,
     create_transaction,
     format_units,
     is_valid_chain,
+    message,
     mine_block,
     parse_coin_amount,
     validate_chain,
 )
+from powchain.protocol import NEW_BLOCK
 
 RULE = "=" * 76
 
@@ -199,12 +212,198 @@ def demo_emission() -> None:
     print(f"  arriverait après {HALVING_INTERVAL * TARGET_BLOCK_TIME // 86400} jours.")
 
 
+# ----------------------------------------------------------------------------
+# Partie 5 : réseau pair-à-pair
+# ----------------------------------------------------------------------------
+
+
+def print_network(net: SimulatedNetwork, nodes: dict[str, Node]) -> None:
+    """Une ligne par nœud : hauteur, travail, pointe, mempool, pairs."""
+    for name, node in nodes.items():
+        peers = ",".join(sorted(p.node_id for p in node.peers))
+        print(
+            f"    {name}: hauteur {node.height}, travail {node.work:>6}, pointe {node.tip.hash[:10]}..., "
+            f"mempool {len(node.mempool)}, pairs [{peers}]"
+        )
+
+
+def print_traffic(net: SimulatedNetwork, since: int) -> None:
+    """Résume les messages livrés depuis l'indice `since` : « A->B new_block x2 »."""
+    counts: dict[str, int] = {}
+    for delivered in net.delivered[since:]:
+        key = f"{delivered.sender}->{delivered.recipient} {delivered.type}"
+        counts[key] = counts.get(key, 0) + 1
+    print("    trafic : " + (", ".join(f"{k}" + (f" x{n}" if n > 1 else "") for k, n in counts.items()) or "aucun"))
+
+
+def demo_simulated_network(wallets: dict[str, KeyPair], names: dict[str, str]) -> None:
+    print_title("6. Réseau pair-à-pair simulé (déterministe : horloge et messages contrôlés)")
+    miner, alice, bob = wallets["miner"], wallets["alice"], wallets["bob"]
+    mallory = KeyPair.generate()
+    names[mallory.address] = "mallory"
+    clock = FakeClock(GENESIS_TIMESTAMP + TARGET_BLOCK_TIME)
+    net = SimulatedNetwork(clock)
+    a = net.add(Node(node_id="A", miner_address=miner.address, clock=clock))
+    b = net.add(Node(node_id="B", clock=clock))
+    c = net.add(Node(node_id="C", miner_address=mallory.address, clock=clock))
+    nodes = {"A": a, "B": b, "C": c}
+
+    print("\n[6a] Découverte. A mine pour « miner », C mine pour « mallory », B ne mine pas.")
+    print("     B se connecte à A, puis C à B : B transmet l'adresse de A, C s'y connecte tout seul.")
+    net.connect("B", "A")
+    mark = len(net.delivered)
+    net.connect("C", "B")
+    print_traffic(net, mark)
+    print_network(net, nodes)
+
+    print("\n[6b] Gossip. A mine 2 blocs ; miner paie alice 10 COIN en soumettant la transaction à C ;")
+    print("     C mine le bloc suivant. Chaque message n'est relayé qu'une fois : la rumeur s'éteint seule.")
+    net.mine("A")
+    clock.advance(TARGET_BLOCK_TIME)
+    net.mine("A")
+    mark = len(net.delivered)
+    net.run("C", c.submit_transaction(create_signed_transaction(miner, alice.address, parse_coin_amount("10"), sequence=0)))
+    print(f"    transaction soumise à C ; en attente sur A : {len(a.mempool)}, B : {len(b.mempool)}, C : {len(c.mempool)}")
+    clock.advance(TARGET_BLOCK_TIME)
+    block = net.mine("C")
+    print(f"    C mine le bloc n°{block.index} avec {len(block.transactions) - 1} transaction ; solde d'alice vu par A : "
+          f"{format_units(a.chain.state.balance_of(alice.address))}")
+    print_traffic(net, mark)
+    print_network(net, nodes)
+
+    print("\n[6c] Fork. Le câble A-B et A-C est coupé ; A et C trouvent chacun un bloc n°4 au même instant.")
+    print("     miner paie bob 7 COIN côté C seulement : confirmé dans le bloc de C.")
+    clock.advance(TARGET_BLOCK_TIME)
+    net.partition("A", "B")
+    net.partition("A", "C")
+    block_a = net.mine("A", coinbase_data="branche A")
+    pay_bob = create_signed_transaction(miner, bob.address, parse_coin_amount("7"), sequence=1)
+    net.run("C", c.submit_transaction(pay_bob))
+    block_c = net.mine("C", coinbase_data="branche C")
+    print(f"    A a le bloc {block_a.hash[:10]}..., B et C ont le bloc {block_c.hash[:10]}... (même travail : chacun garde le sien)")
+    print(f"    solde de bob vu par C : {format_units(c.chain.state.balance_of(bob.address))}, vu par A : "
+          f"{format_units(a.chain.state.balance_of(bob.address))}")
+    print("     Le câble est réparé ; A mine le bloc n°5 : sa branche devient la plus lourde.")
+    net.heal("A", "B")
+    net.heal("A", "C")
+    clock.advance(TARGET_BLOCK_TIME)
+    mark = len(net.delivered)
+    net.mine("A")
+    print_traffic(net, mark)
+    print_network(net, nodes)
+    print(f"    réorganisations : B {b.stats['reorganizations']}, C {c.stats['reorganizations']} ; le paiement à bob est "
+          f"revenu dans le mempool de C : {pay_bob in c.mempool}")
+    print(f"    solde de bob vu par C : {format_units(c.chain.state.balance_of(bob.address))} (le bloc qui le payait est abandonné)")
+    clock.advance(TARGET_BLOCK_TIME)
+    net.mine("C")
+    print(f"    C mine le bloc n°{c.height} : bob est payé sur la bonne branche, partout : "
+          f"{format_units(a.chain.state.balance_of(bob.address))}")
+
+    print("\n[6d] Plus longue n'est pas plus lourde. mallory, isolée, fabrique 3 blocs espacés de 11 s")
+    print("     (la difficulté baisse de 12,5 % à chaque bloc) contre 2 blocs honnêtes rapides.")
+    fork_point = a.tip
+    for _ in range(2):
+        clock.advance(1)
+        net.mine("A")
+    attacker = Blockchain.from_blocks(a.chain.blocks[: fork_point.index + 1])
+    timestamp = fork_point.timestamp
+    for _ in range(3):
+        timestamp += TARGET_BLOCK_TIME + 1
+        attacker.add_block(mine_block(create_block(attacker.last_block, [], mallory.address, timestamp=timestamp)).block)
+    print(f"    honnête : hauteur {a.height}, travail {a.work} ; mallory : hauteur {attacker.height}, travail {attacker.total_work}")
+    clock.advance(60)
+    b.on_connect(99, "sim", False)
+    b.on_message(99, Node(node_id="M", chain=attacker).hello())
+    actions = b.on_message(99, message(NEW_BLOCK, block=block_to_dict(attacker.last_block)))
+    while actions:
+        (request,) = actions
+        batch = attacker.blocks_from(request.message["from_index"], 200)
+        actions = b.on_message(99, message("blocks", blocks=[block_to_dict(x) for x in batch], has_more=False))
+    b.on_disconnect(99)
+    print(f"    B a téléchargé la branche de mallory, l'a pesée et l'a ignorée : hauteur {b.height}, "
+          f"branches plus légères refusées : {b.stats['branches_lighter']}")
+
+    print(f"\n[6e] Borne d'horloge (règle N1). Un bloc daté de {MAX_FUTURE_DRIFT_SECONDS + 1} s dans le futur est refusé,")
+    print("     sans déconnexion : le pair a peut-être une horloge fausse.")
+    future = mine_block(create_block(a.tip, [], mallory.address, timestamp=clock.now + MAX_FUTURE_DRIFT_SECONDS + 1)).block
+    b.on_connect(98, "sim", False)
+    b.on_message(98, Node(node_id="F", clock=clock).hello())
+    actions = b.on_message(98, message(NEW_BLOCK, block=block_to_dict(future)))
+    print(f"    hauteur de B : {b.height}, blocs futurs refusés : {b.stats['blocks_future']}, actions : {actions} ; "
+          f"pair toujours connecté : {b.peer(98) is not None}")
+    clock.advance(MAX_FUTURE_DRIFT_SECONDS + 1)
+    net.run("B", b.on_message(98, message(NEW_BLOCK, block=block_to_dict(future))))
+    print(f"    {MAX_FUTURE_DRIFT_SECONDS + 1} s plus tard, le même bloc est accepté et relayé : hauteurs A {a.height}, B {b.height}, C {c.height}")
+    b.on_disconnect(98)
+
+    print("\n[6f] Bloc invalide (récompense gonflée, correctement miné) : le pair est déconnecté.")
+    template = create_block(b.tip, [], mallory.address, timestamp=b.tip.timestamp + 1)
+    greedy = replace(template.coinbase, amount=template.coinbase.amount + parse_coin_amount("1"))
+    greedy = replace(greedy, hash=greedy.calculate_hash())
+    greedy_block = mine_block(replace(template, transactions=(greedy,))).block
+    b.on_connect(97, "sim", False)
+    b.on_message(97, Node(node_id="G", clock=clock).hello())
+    (action,) = b.on_message(97, message(NEW_BLOCK, block=block_to_dict(greedy_block)))
+    print(f"    {type(action).__name__} : {action.reason}")
+
+    print("\n[6g] Limite honnête : l'attaque majoritaire. mallory dispose de plus de puissance de calcul :")
+    print("     pendant que le réseau produit 1 bloc, elle en produit 3 en privé, à partir d'AVANT le paiement à bob.")
+    net.deliver()
+    paid_in = next(block for block in c.chain.blocks if pay_bob in block.transactions)
+    fork_point = c.chain.block_at(paid_in.index - 1)
+    attacker = Blockchain.from_blocks(c.chain.blocks[: fork_point.index + 1])
+    timestamp = fork_point.timestamp
+    while attacker.total_work <= c.work:
+        timestamp += 1
+        attacker.add_block(mine_block(create_block(attacker.last_block, [], mallory.address, timestamp=timestamp)).block)
+    print(f"    honnête : hauteur {c.height}, travail {c.work} ; mallory repart du bloc n°{fork_point.index} et mine "
+          f"{attacker.height - fork_point.index} blocs rapides : hauteur {attacker.height}, travail {attacker.total_work}")
+    clock.advance(60)
+    net.add(Node(node_id="M", chain=attacker, clock=clock))
+    net.connect("M", "B")
+    print_network(net, nodes)
+    print(f"    bob, qui avait 7 COIN confirmés, en a maintenant {format_units(a.chain.state.balance_of(bob.address))} partout.")
+    print("    Toutes les règles ont été respectées : la chaîne de mallory est valide et plus lourde. La preuve de")
+    print("    travail ne protège l'historique que tant que la majorité de la puissance de calcul est honnête ;")
+    print("    plus un paiement a de blocs au-dessus de lui (confirmations), plus le réécrire coûte cher.")
+
+
+async def demo_real_sockets(wallets: dict[str, KeyPair]) -> None:
+    print_title("7. Le même code sur de vraies sockets TCP (127.0.0.1, ports choisis par le système)")
+    miner, alice = wallets["miner"], wallets["alice"]
+    servers = {
+        name: NodeServer(Node(node_id=name, log=lambda t, n=name: print(f"    [{n}] {t}")))
+        for name in ("A", "B", "C")
+    }
+    for server in servers.values():
+        await server.start()
+    a, b, c = servers["A"], servers["B"], servers["C"]
+    print(f"    A écoute sur {a.address} ; B se connecte à A ; C se connecte à B et découvre A.")
+    await b.connect(a.address)
+    await c.connect(b.address)
+    await c.wait_until(lambda: len(c.node.peers) == 2 and len(a.node.peers) == 2, timeout=20)
+    print("    A se met à miner : chaque bloc trouvé traverse le réseau (le minage tourne par tranches dans asyncio).")
+    a.start_mining(miner.address)
+    await c.wait_until(lambda: c.node.height >= 3, timeout=20)
+    tx = create_signed_transaction(miner, alice.address, parse_coin_amount("1"), sequence=0)
+    print("    C soumet « miner -> alice 1 COIN » ; elle voyage jusqu'à A, qui la mine ; le bloc revient jusqu'à C.")
+    await c._execute(c.node.submit_transaction(tx))
+    ok = await c.wait_until(lambda: c.node.chain.state.balance_of(alice.address) == parse_coin_amount("1"), timeout=20)
+    print(f"    alice payée, vu par C : {ok} ; hauteurs A {a.node.height}, B {b.node.height}, C {c.node.height} ; "
+          f"blocs minés par A : {a.blocks_mined}")
+    for server in servers.values():
+        await server.stop()
+    print("    Pour essayer entre terminaux : python -m powchain node --port 5000 --mine <adresse>  (voir README)")
+
+
 def main() -> None:
     wallets, names = demo_keys()
     chain, pool = demo_genesis_and_first_reward(wallets, names)
     demo_mempool(chain, pool, wallets, names)
     demo_attacks(chain, wallets, names)
     demo_emission()
+    demo_simulated_network(wallets, names)
+    asyncio.run(demo_real_sockets(wallets))
     print()
 
 
