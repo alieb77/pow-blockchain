@@ -5,15 +5,19 @@ Construire :   pip install pyinstaller
                pyinstaller flous.spec --noconfirm --clean
 Résultat :     dist/FLOUS.exe  (Windows)  /  dist/FLOUS (Linux, macOS)
 
-Le fichier de l'explorateur (powchain/web/explorer.html) est embarqué dans
-« datas » : l'API le sert alors depuis les données extraites (sys._MEIPASS),
-via powchain.api.load_explorer_html.
+Les pages web (powchain/web/*.html : explorateur, portefeuille) sont embarquées
+dans « datas » : l'API les sert alors depuis les données extraites
+(sys._MEIPASS), via powchain.api.load_explorer_html / load_wallet_html.
 """
+import glob
 import os
 
 from PyInstaller.utils.hooks import collect_submodules
 
-datas = [(os.path.join("powchain", "web", "explorer.html"), os.path.join("powchain", "web"))]
+datas = [
+    (path, os.path.join("powchain", "web"))
+    for path in glob.glob(os.path.join("powchain", "web", "*.html"))
+]
 hiddenimports = collect_submodules("powchain")
 
 a = Analysis(

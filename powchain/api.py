@@ -82,6 +82,7 @@ STATUS_TEXT = {
 ROUTES = (
     "GET /                explorateur de blocs (navigateur) ou index JSON (client API)",
     "GET /explorer        explorateur de blocs (page web façon Tetris)",
+    "GET /wallet          portefeuille web (créer une adresse, envoyer des FLS ; clés côté navigateur)",
     "GET /status",
     "GET /blocks?limit=20&before=<hauteur>",
     "GET /blocks/<index|hash>",
@@ -94,24 +95,25 @@ ROUTES = (
 )
 
 
-_EXPLORER_CACHE: str | None = None
+_WEB_ASSET_CACHE: dict[str, str] = {}
 
 
-def load_explorer_html() -> str:
-    """Le HTML de l'explorateur de blocs (powchain/web/explorer.html), chargé une fois puis mis en cache.
+def _load_web_asset(filename: str, fallback: str) -> str:
+    """Charge une page de powchain/web/ (une fois, puis mise en cache).
 
-    Empaqueté avec le module (importlib.resources) : fonctionne aussi bien
-    depuis les sources que depuis un exécutable PyInstaller (le .spec ajoute ce
-    fichier aux données). Un fichier manquant renvoie une page minimale plutôt
+    Empaquetée avec le module (importlib.resources) : fonctionne aussi bien
+    depuis les sources que depuis un exécutable PyInstaller (le .spec ajoute ces
+    fichiers aux données). Un fichier manquant renvoie une page minimale plutôt
     que de faire échouer le nœud.
     """
-    global _EXPLORER_CACHE
-    if _EXPLORER_CACHE is not None:
-        return _EXPLORER_CACHE
+    cached = _WEB_ASSET_CACHE.get(filename)
+    if cached is not None:
+        return cached
     # 1) Depuis les sources ou un paquet installé (importlib.resources).
     try:
-        _EXPLORER_CACHE = resources.files("powchain.web").joinpath("explorer.html").read_text(encoding="utf-8")
-        return _EXPLORER_CACHE
+        text = resources.files("powchain.web").joinpath(filename).read_text(encoding="utf-8")
+        _WEB_ASSET_CACHE[filename] = text
+        return text
     except (FileNotFoundError, ModuleNotFoundError, OSError, TypeError):
         pass
     # 2) Repli pour un exécutable PyInstaller (données extraites dans sys._MEIPASS).
@@ -121,15 +123,32 @@ def load_explorer_html() -> str:
     for base in (getattr(sys, "_MEIPASS", None), os.path.dirname(os.path.dirname(__file__))):
         if not base:
             continue
-        candidate = os.path.join(base, "powchain", "web", "explorer.html")
+        candidate = os.path.join(base, "powchain", "web", filename)
         try:
             with open(candidate, encoding="utf-8") as handle:
-                _EXPLORER_CACHE = handle.read()
-                return _EXPLORER_CACHE
+                text = handle.read()
+                _WEB_ASSET_CACHE[filename] = text
+                return text
         except OSError:
             continue
-    _EXPLORER_CACHE = "<!doctype html><meta charset=utf-8><title>FLOUS</title><p>Explorateur indisponible ; API JSON sur /status."
-    return _EXPLORER_CACHE
+    _WEB_ASSET_CACHE[filename] = fallback
+    return fallback
+
+
+def load_explorer_html() -> str:
+    """Le HTML de l'explorateur de blocs (powchain/web/explorer.html)."""
+    return _load_web_asset(
+        "explorer.html",
+        "<!doctype html><meta charset=utf-8><title>FLOUS</title><p>Explorateur indisponible ; API JSON sur /status.",
+    )
+
+
+def load_wallet_html() -> str:
+    """Le HTML du portefeuille web (powchain/web/wallet.html)."""
+    return _load_web_asset(
+        "wallet.html",
+        "<!doctype html><meta charset=utf-8><title>FLOUS Wallet</title><p>Portefeuille indisponible ; utilisez python -m powchain wallet.",
+    )
 
 
 class ApiError(Exception):
@@ -265,6 +284,10 @@ class ApiServer:
             if not reading:
                 raise ApiError(405, "cette route se lit (GET)")
             return self._explorer()
+        if head == "wallet" and not rest:
+            if not reading:
+                raise ApiError(405, "cette route se lit (GET)")
+            return self._wallet()
         if head == "status" and not rest:
             return self._get_only(reading, self._status)
         if head == "blocks" and not rest:
@@ -297,6 +320,9 @@ class ApiServer:
 
     def _explorer(self) -> Response:
         return Response(200, load_explorer_html(), content_type="text/html; charset=utf-8")
+
+    def _wallet(self) -> Response:
+        return Response(200, load_wallet_html(), content_type="text/html; charset=utf-8")
 
     def _index(self) -> dict:
         return {

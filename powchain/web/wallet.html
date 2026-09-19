@@ -1,0 +1,513 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>FLOUS Wallet</title>
+<meta name="description" content="Portefeuille FLOUS (FLS) — créez une adresse, recevez et envoyez des FLS. Les clés ne quittent jamais votre navigateur.">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Press+Start+2P&family=VT323&display=swap" rel="stylesheet">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Crect width='100' height='100' fill='%2310121c'/%3E%3Crect x='12' y='12' width='34' height='34' fill='%2300f0f0'/%3E%3Crect x='54' y='12' width='34' height='34' fill='%23f0a000'/%3E%3Crect x='12' y='54' width='34' height='34' fill='%23a000f0'/%3E%3Crect x='54' y='54' width='34' height='34' fill='%23f00000'/%3E%3C/svg%3E">
+<style>
+  :root{
+    --I:#00f0f0; --O:#f0f000; --T:#a000f0; --S:#00f000; --J:#2255f0; --Z:#f00000; --L:#f0a000;
+    --bg:#0b0d17; --bg2:#10121c; --panel:#161a2b; --panel2:#1d2233;
+    --ink:#e8ecff; --dim:#8b93b8; --line:#2a3150; --accent:#00f0f0;
+    --bevel-lt:rgba(255,255,255,.55); --bevel-dk:rgba(0,0,0,.55);
+  }
+  *{box-sizing:border-box}
+  html,body{margin:0;height:100%}
+  body{
+    background:var(--bg); color:var(--ink);
+    font-family:'VT323',monospace; font-size:20px; line-height:1.35;
+    overflow-x:hidden; position:relative; min-height:100%;
+  }
+  canvas#bg{position:fixed; inset:0; width:100%; height:100%; z-index:0; opacity:.25}
+  .crt{position:fixed; inset:0; z-index:50; pointer-events:none;
+    background:repeating-linear-gradient(0deg, rgba(0,0,0,0) 0, rgba(0,0,0,0) 2px, rgba(0,0,0,.18) 3px, rgba(0,0,0,0) 4px);
+    mix-blend-mode:multiply;}
+  .crt::after{content:''; position:absolute; inset:0;
+    background:radial-gradient(ellipse at center, rgba(0,0,0,0) 55%, rgba(0,0,0,.45) 100%);}
+  .wrap{position:relative; z-index:10; max-width:820px; margin:0 auto; padding:16px}
+
+  h1,h2,h3,.px{font-family:'Press Start 2P',monospace; letter-spacing:1px}
+  h1{font-size:26px; margin:.2em 0}
+  .bevel{border-style:solid; border-width:4px;
+    border-color:var(--bevel-lt) var(--bevel-dk) var(--bevel-dk) var(--bevel-lt);
+    box-shadow:inset 0 0 0 2px rgba(0,0,0,.25);}
+  .brand-blocks{display:inline-grid; grid-template-columns:repeat(2,18px); grid-auto-rows:18px; gap:3px; vertical-align:middle; margin-right:12px}
+  .brand-blocks i{display:block}
+
+  header{display:flex; flex-wrap:wrap; align-items:center; gap:12px; margin-bottom:10px}
+  .title{display:flex; align-items:center; gap:6px}
+  .ticker{font-family:'Press Start 2P',monospace; font-size:12px; color:#0b0d17; background:var(--I); padding:6px 8px; }
+  .dot{width:12px; height:12px; border-radius:50%; background:var(--Z); box-shadow:0 0 8px currentColor; color:var(--Z)}
+  .dot.ok{background:var(--S); color:var(--S)}
+  .status-line{color:var(--dim); font-size:17px}
+  a.link{color:var(--I); cursor:pointer; text-decoration:underline}
+  a.nav{font-family:'Press Start 2P',monospace; font-size:9px; color:var(--O); text-decoration:none; border-bottom:2px solid var(--O); padding-bottom:2px}
+
+  .bar{display:flex; flex-wrap:wrap; gap:8px; align-items:center; margin:10px 0}
+  input[type=text],input[type=password]{background:#0a0c15; color:var(--ink); border:2px solid var(--line);
+    font-family:'VT323',monospace; font-size:18px; padding:8px 10px; min-width:0; flex:1}
+  label.fld{display:block; margin:10px 0}
+  label.fld .k{font-family:'Press Start 2P',monospace; font-size:9px; color:var(--dim); display:block; margin-bottom:6px}
+  label.fld input{width:100%; flex:none}
+  button{font-family:'Press Start 2P',monospace; font-size:11px; cursor:pointer; color:#0b0d17;
+    background:var(--S); padding:10px 12px; border:0}
+  button:active{transform:translateY(2px)}
+  button.alt{background:var(--O)} button.cy{background:var(--I)} button.danger{background:var(--Z); color:#fff}
+  button:disabled{opacity:.4; cursor:not-allowed}
+
+  .card{background:var(--panel); padding:14px; margin-bottom:14px}
+  .card h2{font-size:12px; margin:0 0 12px; color:var(--accent)}
+  .card.pad2{background:var(--panel2)}
+  .hud{display:grid; grid-template-columns:1fr 1fr; gap:10px; margin:6px 0 12px}
+  .hud .cell{background:var(--panel2); padding:12px}
+  .hud .k{font-family:'Press Start 2P',monospace; font-size:8px; color:var(--dim)}
+  .hud .v{font-family:'Press Start 2P',monospace; font-size:18px; margin-top:8px; word-break:break-all}
+  .hud .cell:nth-child(1) .v{color:var(--O)}
+  .hud .cell:nth-child(2) .v{color:var(--I)}
+
+  .addr{font-size:17px; word-break:break-all; background:#0a0c15; padding:10px; border:2px solid var(--line)}
+  .addr b{color:var(--I)}
+  .mono{font-size:16px; word-break:break-all}
+  .kv{display:flex; justify-content:space-between; gap:10px; padding:4px 0; border-bottom:1px dashed var(--line)}
+  .kv .k{color:var(--dim)} .kv .v{text-align:right; word-break:break-all}
+  .tx{background:var(--panel2); padding:8px 10px; margin:6px 0; border-left:4px solid var(--T)}
+  .tx.in{border-left-color:var(--S)} .tx.out{border-left-color:var(--Z)} .tx.coinbase{border-left-color:var(--O)}
+  .pill{display:inline-block; font-family:'Press Start 2P',monospace; font-size:8px; padding:3px 5px; color:#08101a; background:var(--S)}
+  .pill.pending{background:var(--O)} .pill.out{background:var(--Z); color:#fff} .pill.in{background:var(--S)} .pill.coinbase{background:var(--I)}
+  .empty{color:var(--dim); padding:8px 0}
+  .err{color:var(--Z); font-size:17px} .ok{color:var(--S); font-size:17px}
+  .warn{background:#2a1414; border:2px solid var(--Z); padding:10px; color:#ffd0d0; font-size:17px; margin:10px 0}
+  .seedbox{background:#0a0c15; border:2px dashed var(--O); padding:10px; font-size:16px; word-break:break-all; color:var(--O)}
+  .row{display:flex; gap:8px; flex-wrap:wrap; align-items:center}
+  .hide{display:none !important}
+  footer{color:var(--dim); font-size:16px; text-align:center; margin:24px 0 8px}
+  .muted{color:var(--dim); font-size:16px}
+</style>
+</head>
+<body>
+<canvas id="bg"></canvas>
+<div class="crt"></div>
+
+<div class="wrap">
+  <header>
+    <span class="brand-blocks" aria-hidden="true">
+      <i style="background:var(--I)" class="bevel"></i><i style="background:var(--O)" class="bevel"></i>
+      <i style="background:var(--T)" class="bevel"></i><i style="background:var(--L)" class="bevel"></i>
+    </span>
+    <div class="title"><h1>FLOUS</h1><span class="ticker bevel">WALLET</span></div>
+    <span style="flex:1"></span>
+    <a class="nav" id="toExplorer" href="/explorer">▚ EXPLORATEUR</a>
+    <span class="dot" id="dot" title="etat du noeud"></span>
+    <span class="status-line" id="conn">connexion…</span>
+  </header>
+
+  <div class="bar">
+    <input type="text" id="node" placeholder="http://adresse-du-noeud:8000" spellcheck="false">
+    <button id="go" class="cy">CONNECTER</button>
+  </div>
+
+  <div id="unsupported" class="warn hide">
+    Votre navigateur ne sait pas signer en Ed25519 (Web Crypto). Utilisez un Chrome/Edge/Firefox/Safari récent,
+    ou la ligne de commande <span class="mono">python -m powchain</span> pour envoyer des FLS.
+  </div>
+
+  <!-- ÉCRAN 1 : aucune clé chargée -->
+  <div id="screenNoKey">
+    <div class="card">
+      <h2>▚ PORTEFEUILLE</h2>
+      <p class="muted">Un portefeuille FLOUS, c'est une paire de clés Ed25519. La clé publique est votre adresse
+        (on vous y envoie des FLS) ; la clé privée signe vos paiements et <b>ne quitte jamais ce navigateur</b>.</p>
+      <div class="row" style="margin-top:12px">
+        <button id="btnCreate" class="cy">CRÉER UNE ADRESSE</button>
+        <button id="btnImport" class="alt">IMPORTER UNE CLÉ</button>
+      </div>
+      <div id="savedBox" class="card pad2 hide" style="margin-top:14px">
+        <div class="k px" style="font-size:9px;color:var(--dim);margin-bottom:8px">PORTEFEUILLE ENREGISTRÉ DANS CE NAVIGATEUR</div>
+        <div class="mono" id="savedAddr" style="margin-bottom:8px"></div>
+        <label class="fld"><span class="k">MOT DE PASSE</span><input type="password" id="unlockPwd" placeholder="mot de passe du portefeuille"></label>
+        <div class="row">
+          <button id="btnUnlock" class="cy">DÉVERROUILLER</button>
+          <button id="btnForget" class="danger">OUBLIER</button>
+        </div>
+        <div id="unlockMsg" class="err" style="margin-top:8px"></div>
+      </div>
+    </div>
+
+    <!-- import -->
+    <div id="importBox" class="card hide">
+      <h2>▚ IMPORTER UNE CLÉ PRIVÉE</h2>
+      <label class="fld"><span class="k">CLÉ PRIVÉE (64 CARACTÈRES HEX)</span>
+        <input type="text" id="importSeed" placeholder="graine hexadécimale de 64 caractères" spellcheck="false"></label>
+      <div class="row"><button id="btnDoImport" class="cy">CHARGER</button>
+        <button id="btnCancelImport" class="alt">ANNULER</button></div>
+      <div id="importMsg" class="err" style="margin-top:8px"></div>
+    </div>
+
+    <!-- après création : montrer la graine une fois -->
+    <div id="newKeyBox" class="card hide">
+      <h2>▚ NOUVELLE ADRESSE — SAUVEGARDEZ LA CLÉ</h2>
+      <div class="warn">⚠ Ceci est la <b>seule</b> sauvegarde de votre clé privée. Écrivez-la et gardez-la secrète.
+        Qui la possède possède les fonds. Personne ne peut la récupérer si vous la perdez.</div>
+      <div class="k px" style="font-size:9px;color:var(--dim);margin:10px 0 6px">VOTRE ADRESSE (À PARTAGER)</div>
+      <div class="addr mono" id="newAddr"></div>
+      <div class="k px" style="font-size:9px;color:var(--dim);margin:12px 0 6px">VOTRE CLÉ PRIVÉE (SECRÈTE)</div>
+      <div class="seedbox" id="newSeed"></div>
+      <div class="row" style="margin-top:10px">
+        <button id="btnCopySeed" class="alt">COPIER LA CLÉ</button>
+        <button id="btnSeedSaved" class="cy">J'AI SAUVEGARDÉ — CONTINUER</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ÉCRAN 2 : clé chargée -->
+  <div id="screenKey" class="hide">
+    <div class="card">
+      <h2>▚ MON ADRESSE</h2>
+      <div class="addr mono" id="myAddr"></div>
+      <div class="row" style="margin-top:10px">
+        <button id="btnCopyAddr" class="alt">COPIER L'ADRESSE</button>
+        <button id="btnSave" class="cy">ENREGISTRER DANS CE NAVIGATEUR</button>
+        <button id="btnReveal" class="alt">RÉVÉLER LA CLÉ</button>
+        <button id="btnLock" class="danger">FERMER</button>
+      </div>
+      <div id="saveMsg" class="ok" style="margin-top:8px"></div>
+      <div id="revealBox" class="hide" style="margin-top:10px">
+        <div class="warn">Ne montrez ceci à personne.</div>
+        <div class="seedbox mono" id="revealSeed"></div>
+      </div>
+    </div>
+
+    <div class="hud">
+      <div class="cell bevel"><div class="k">SOLDE (FLS)</div><div class="v" id="balance">—</div></div>
+      <div class="cell bevel"><div class="k">EN ATTENTE</div><div class="v" id="pending">—</div></div>
+    </div>
+
+    <div class="card">
+      <h2>▚ ENVOYER DES FLS</h2>
+      <label class="fld"><span class="k">DESTINATAIRE (ADRESSE 64 HEX)</span>
+        <input type="text" id="to" placeholder="adresse du destinataire" spellcheck="false"></label>
+      <div class="row">
+        <label class="fld" style="flex:1"><span class="k">MONTANT (FLS)</span>
+          <input type="text" id="amount" placeholder="0.0" spellcheck="false"></label>
+        <label class="fld" style="flex:1"><span class="k">FRAIS (FLS)</span>
+          <input type="text" id="fee" placeholder="0.0001" spellcheck="false"></label>
+      </div>
+      <label class="fld"><span class="k">MESSAGE (FACULTATIF)</span>
+        <input type="text" id="data" placeholder="note publique inscrite dans la transaction" spellcheck="false"></label>
+      <div class="row"><button id="btnSend" class="cy">SIGNER ET ENVOYER</button>
+        <span class="muted" id="sendHint"></span></div>
+      <div id="sendMsg" style="margin-top:8px"></div>
+    </div>
+
+    <div class="card">
+      <h2>▚ HISTORIQUE</h2>
+      <div id="history"><div class="empty">—</div></div>
+    </div>
+  </div>
+
+  <footer>
+    FLOUS (FLS) — portefeuille sans dépôt · les clés restent dans votre navigateur · moteur <b>powchain</b> · MIT
+  </footer>
+</div>
+
+<script>
+"use strict";
+const $ = id => document.getElementById(id);
+const show = (el,on)=> el.classList.toggle('hide', !on);
+const short = (s,n=10) => (s && s.length>n*2) ? s.slice(0,n)+'…'+s.slice(-6) : (s||'');
+const UNITS = 100000000n; // 1 FLS = 1e8 unités (money.py)
+const TX_DOMAIN = "powchain/tx/v3";
+const MIN_FEE_DEFAULT = 10000n; // 0.0001 FLS
+
+// ---------- format / parsing entier (jamais de flottant) ----------
+function fmtFLS(units){ const u = Number(units||0); return (u/1e8).toLocaleString('fr-FR',{maximumFractionDigits:8}); }
+function fmtTime(ts){ try{ return new Date(ts*1000).toLocaleString('fr-FR'); }catch(e){ return ts; } }
+function parseCoin(text){ // "1.5" -> BigInt unités ; lève sur entrée invalide
+  const t = (text||"").trim();
+  if(!/^\d+(\.\d+)?$/.test(t)) throw new Error("montant invalide (ex. 1.5)");
+  const [whole, frac=""] = t.split(".");
+  if(frac.length > 8) throw new Error("au plus 8 décimales");
+  return BigInt(whole) * UNITS + BigInt((frac+"00000000").slice(0,8));
+}
+
+// ---------- hex / base64url / octets ----------
+const TE = new TextEncoder();
+function hexToBytes(h){ const b = new Uint8Array(h.length/2); for(let i=0;i<b.length;i++) b[i]=parseInt(h.substr(i*2,2),16); return b; }
+function bytesToHex(b){ return Array.from(b).map(x=>x.toString(16).padStart(2,'0')).join(''); }
+function b64urlToBytes(s){ s=s.replace(/-/g,'+').replace(/_/g,'/'); while(s.length%4)s+='='; const bin=atob(s); const b=new Uint8Array(bin.length); for(let i=0;i<bin.length;i++)b[i]=bin.charCodeAt(i); return b; }
+function bytesToB64url(b){ let s=''; for(const x of b) s+=String.fromCharCode(x); return btoa(s).replace(/\+/g,'-').replace(/\//g,'_').replace(/=+$/,''); }
+function concat(...arrs){ let n=0; for(const a of arrs)n+=a.length; const out=new Uint8Array(n); let o=0; for(const a of arrs){out.set(a,o); o+=a.length;} return out; }
+function u32(n){ const b=new Uint8Array(4); new DataView(b.buffer).setUint32(0,n,false); return b; }
+function u64(big){ const b=new Uint8Array(8); new DataView(b.buffer).setBigUint64(0,BigInt(big),false); return b; }
+function encStr(s){ const u=TE.encode(s); return concat(u32(u.length), u); }
+
+// ---------- SHA-256 ----------
+async function sha256(bytes){ return new Uint8Array(await crypto.subtle.digest('SHA-256', bytes)); }
+async function sha256hex(bytes){ return bytesToHex(await sha256(bytes)); }
+
+// ---------- somme de contrôle d'adresse (EIP-55 sur SHA-256, cf address.py) ----------
+async function toChecksummed(addr){
+  const digest = await sha256hex(TE.encode(addr)); // hash de l'adresse minuscule ascii
+  let out='';
+  for(let i=0;i<addr.length;i++){ const c=addr[i];
+    out += ("abcdef".includes(c) && parseInt(digest[i],16) >= 8) ? c.toUpperCase() : c; }
+  return out;
+}
+async function hasValidChecksum(v){
+  if(!/^[0-9a-fA-F]{64}$/.test(v)) return false;
+  return v === await toChecksummed(v.toLowerCase());
+}
+
+// ---------- sérialisation + hash canonique d'une transaction (serialization.py) ----------
+function serializeTxFields(sender,recipient,amount,fee,data,sequence){
+  return concat(TE.encode(TX_DOMAIN), encStr(sender), encStr(recipient),
+                u64(amount), u64(fee), encStr(data), u64(sequence));
+}
+async function txHashHex(sender,recipient,amount,fee,data,sequence){
+  return sha256hex(serializeTxFields(sender,recipient,amount,fee,data,sequence));
+}
+
+// ---------- clés Ed25519 via Web Crypto (aucune dépendance) ----------
+const PKCS8_ED25519_PREFIX = hexToBytes("302e020100300506032b657004220420"); // + 32 octets de graine
+const CRYPTO_OK = !!(window.crypto && crypto.subtle && crypto.subtle.importKey);
+
+async function keyFromSeed(seedBytes){ // -> {priv: CryptoKey, address: hex}
+  const der = concat(PKCS8_ED25519_PREFIX, seedBytes);
+  const priv = await crypto.subtle.importKey('pkcs8', der, {name:'Ed25519'}, true, ['sign']);
+  const jwk = await crypto.subtle.exportKey('jwk', priv);      // x = clé publique (base64url)
+  const address = bytesToHex(b64urlToBytes(jwk.x));
+  return {priv, address, seedHex: bytesToHex(seedBytes)};
+}
+async function generateKey(){
+  const seed = crypto.getRandomValues(new Uint8Array(32));
+  return keyFromSeed(seed);
+}
+async function signHashBytes(priv, hashBytes){
+  const sig = new Uint8Array(await crypto.subtle.sign({name:'Ed25519'}, priv, hashBytes));
+  return bytesToHex(sig); // 128 hex
+}
+
+// ---------- état ----------
+const BOOTNODE = 'http://51.170.139.244:8000';
+function defaultNode(){ if((location.protocol==='http:'||location.protocol==='https:') && location.hostname) return location.origin; return BOOTNODE; }
+let NODE = localStorage.getItem('flous.node') || defaultNode();
+$('node').value = NODE;
+let WALLET = null;      // {priv, address, seedHex}
+let MIN_FEE = MIN_FEE_DEFAULT;
+let pollTimer = null;
+
+async function api(path, opts){
+  const base = NODE.replace(/\/+$/,'');
+  const r = await fetch(base+path, Object.assign({headers:{'Accept':'application/json'}, cache:'no-store'}, opts||{}));
+  let body; try{ body = await r.json(); }catch(_){ body = null; }
+  if(!r.ok) throw new Error((body && body.error) || ('HTTP '+r.status));
+  return body;
+}
+
+function setConn(ok, text){ $('dot').className='dot'+(ok?' ok':''); $('conn').textContent=text; }
+
+async function refreshStatus(){
+  try{
+    const s = await api('/status');
+    setConn(true, `noeud ${short(s.node_id,6)} · en ligne`);
+    if(s.min_fee!=null){ MIN_FEE = BigInt(s.min_fee); if(!$('fee').value) $('fee').value = fmtFLS(MIN_FEE); }
+    $('sendHint').textContent = `frais mini du réseau : ${fmtFLS(MIN_FEE)} FLS`;
+  }catch(e){ setConn(false, 'noeud injoignable'); }
+}
+
+async function refreshAccount(){
+  if(!WALLET) return;
+  try{
+    const a = await api('/accounts/'+WALLET.address);
+    $('balance').textContent = fmtFLS(a.projected_balance);
+    const pend = (a.projected_balance!=null && a.balance!=null) ? (BigInt(a.projected_balance)-BigInt(a.balance)) : 0n;
+    $('pending').textContent = (a.pending||0) + ' tx';
+  }catch(e){ $('balance').textContent='—'; }
+  try{
+    const h = await api('/accounts/'+WALLET.address+'/transactions?limit=25');
+    renderHistory(h);
+  }catch(e){}
+}
+
+function txRow(t, confirmed){
+  const out = t.sender === WALLET.address;
+  const cb = t.sender === '0'.repeat(64);
+  const cls = cb ? 'coinbase' : (out ? 'out' : 'in');
+  const other = cb ? 'récompense de minage' : (out ? '→ '+short(t.recipient,8) : '← '+short(t.sender,8));
+  const sign = cb ? '+' : (out ? '−' : '+');
+  const amt = cb ? t.amount : t.amount;
+  const pill = !confirmed ? '<span class="pill pending">EN ATTENTE</span>'
+             : (cb ? '<span class="pill coinbase">MINAGE</span>' : (out?'<span class="pill out">ENVOYÉ</span>':'<span class="pill in">REÇU</span>'));
+  const when = confirmed ? `bloc #${t.block_index} · ${fmtTime(t.timestamp)}` : 'mempool';
+  const note = t.data ? `<div class="muted">« ${escapeHtml(t.data)} »</div>` : '';
+  return `<div class="tx ${cls}"><div class="row" style="justify-content:space-between">
+    <span>${pill} ${other}</span><b>${sign}${fmtFLS(amt)} FLS</b></div>
+    <div class="muted">${when}${(out&&t.fee)?` · frais ${fmtFLS(t.fee)}`:''}</div>${note}</div>`;
+}
+function renderHistory(h){
+  const parts=[];
+  (h.pending||[]).forEach(t=> parts.push(txRow(t,false)));
+  (h.transactions||[]).forEach(t=> parts.push(txRow(t,true)));
+  $('history').innerHTML = parts.length ? parts.join('') : '<div class="empty">aucune transaction pour le moment</div>';
+}
+function escapeHtml(s){ return String(s).replace(/[&<>"]/g, c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
+
+// ---------- écrans ----------
+async function enterWallet(kp){
+  WALLET = kp;
+  $('myAddr').innerHTML = await addrDisplay(kp.address);
+  show($('screenNoKey'), false); show($('screenKey'), true);
+  show($('revealBox'), false); $('saveMsg').textContent=''; $('sendMsg').textContent='';
+  $('to').value=''; $('amount').value=''; $('data').value='';
+  if(!$('fee').value) $('fee').value = fmtFLS(MIN_FEE);
+  await refreshAccount();
+  if(pollTimer) clearInterval(pollTimer);
+  pollTimer = setInterval(()=>{ refreshStatus(); refreshAccount(); }, 6000);
+}
+async function addrDisplay(addr){ const c = await toChecksummed(addr); return `<b>${c}</b>`; }
+function lockWallet(){
+  WALLET=null; if(pollTimer){clearInterval(pollTimer); pollTimer=null;}
+  show($('screenKey'), false); show($('screenNoKey'), true);
+  show($('importBox'),false); show($('newKeyBox'),false);
+  loadSavedBox();
+}
+
+// ---------- sauvegarde chiffrée locale (PBKDF2 + AES-GCM) ----------
+async function deriveKey(pwd, salt){
+  const base = await crypto.subtle.importKey('raw', TE.encode(pwd), 'PBKDF2', false, ['deriveKey']);
+  return crypto.subtle.deriveKey({name:'PBKDF2', salt, iterations:200000, hash:'SHA-256'},
+    base, {name:'AES-GCM', length:256}, false, ['encrypt','decrypt']);
+}
+async function saveWallet(pwd){
+  const salt = crypto.getRandomValues(new Uint8Array(16));
+  const iv = crypto.getRandomValues(new Uint8Array(12));
+  const key = await deriveKey(pwd, salt);
+  const ct = new Uint8Array(await crypto.subtle.encrypt({name:'AES-GCM', iv}, key, hexToBytes(WALLET.seedHex)));
+  localStorage.setItem('flous.wallet', JSON.stringify({v:1, address:WALLET.address,
+    salt:bytesToB64url(salt), iv:bytesToB64url(iv), ct:bytesToB64url(ct)}));
+}
+async function unlockWallet(pwd){
+  const raw = localStorage.getItem('flous.wallet'); if(!raw) throw new Error('aucun portefeuille enregistré');
+  const o = JSON.parse(raw);
+  const key = await deriveKey(pwd, b64urlToBytes(o.salt));
+  let seed;
+  try{ seed = new Uint8Array(await crypto.subtle.decrypt({name:'AES-GCM', iv:b64urlToBytes(o.iv)}, key, b64urlToBytes(o.ct))); }
+  catch(e){ throw new Error('mot de passe erroné'); }
+  return keyFromSeed(seed);
+}
+function loadSavedBox(){
+  const raw = localStorage.getItem('flous.wallet');
+  if(raw){ try{ const o=JSON.parse(raw); toChecksummed(o.address).then(c=>{$('savedAddr').innerHTML='<b>'+short(c,10)+'</b>';}); show($('savedBox'),true);}catch(e){ show($('savedBox'),false);} }
+  else show($('savedBox'),false);
+}
+
+// ---------- envoi ----------
+async function doSend(){
+  $('sendMsg').textContent=''; $('sendMsg').className='';
+  const btn=$('btnSend'); btn.disabled=true;
+  try{
+    let to = ($('to').value||'').trim();
+    if(!/^[0-9a-fA-F]{64}$/.test(to)) throw new Error("adresse destinataire invalide (64 caractères hexadécimaux)");
+    if(/[A-F]/.test(to)){ // forme à casse mixte -> on vérifie la somme de contrôle
+      if(!await hasValidChecksum(to)) throw new Error("somme de contrôle du destinataire invalide : recopiez l'adresse exacte");
+    }
+    to = to.toLowerCase();
+    const amount = parseCoin($('amount').value);
+    const fee = $('fee').value.trim() ? parseCoin($('fee').value) : 0n;
+    const data = $('data').value || "";
+    if(amount===0n && data==="") throw new Error("transaction vide : indiquez un montant ou un message");
+    if(TE.encode(data).length > 1024) throw new Error("message trop long (max 1024 octets)");
+    if(to === WALLET.address) throw new Error("le destinataire est votre propre adresse");
+    // séquence : celle projetée (tient compte du mempool) pour enchaîner les envois
+    const acc = await api('/accounts/'+WALLET.address);
+    const sequence = BigInt(acc.projected_next_sequence);
+    const need = amount + fee;
+    if(BigInt(acc.projected_balance) < need) throw new Error(`solde insuffisant : ${fmtFLS(acc.projected_balance)} FLS disponibles, ${fmtFLS(need)} requis`);
+    // hash + signature
+    const hash = await txHashHex(WALLET.address, to, amount, fee, data, sequence);
+    const signature = await signHashBytes(WALLET.priv, hexToBytes(hash));
+    const tx = {sender:WALLET.address, recipient:to, amount:Number(amount)<=Number.MAX_SAFE_INTEGER?Number(amount):amount,
+                fee:Number(fee), data, sequence:Number(sequence), hash, signature};
+    // JSON.stringify ne sait pas sérialiser BigInt : on force en Number (montants < 2^53 en pratique) ou string numérique
+    const payload = jsonWithBigInts({sender:WALLET.address, recipient:to, amount, fee, data, sequence, hash, signature});
+    const res = await api('/transactions', {method:'POST', headers:{'Content-Type':'application/json','Accept':'application/json'}, body:payload});
+    $('sendMsg').className='ok';
+    $('sendMsg').innerHTML = `✔ envoyé — transaction <span class="mono">${short(res.hash,8)}</span> en attente de minage`;
+    $('amount').value=''; $('data').value='';
+    await refreshAccount();
+  }catch(e){ $('sendMsg').className='err'; $('sendMsg').textContent = '✖ '+e.message; }
+  finally{ btn.disabled=false; }
+}
+// sérialise un objet en JSON où les BigInt deviennent des nombres JSON entiers (le codec attend des entiers JSON)
+function jsonWithBigInts(obj){
+  return '{'+Object.entries(obj).map(([k,v])=>{
+    const key = JSON.stringify(k);
+    if(typeof v==='bigint') return key+':'+v.toString();
+    return key+':'+JSON.stringify(v);
+  }).join(',')+'}';
+}
+
+// ---------- fond animé (blocs qui tombent) ----------
+(function(){
+  const cv=$('bg'), cx=cv.getContext('2d'); const COLS=['#00f0f0','#f0f000','#a000f0','#00f000','#2255f0','#f00000','#f0a000'];
+  let W,H,cells=[]; function rs(){ W=cv.width=innerWidth; H=cv.height=innerHeight; }
+  window.addEventListener('resize', rs); rs();
+  for(let i=0;i<40;i++) cells.push({x:Math.random()*W, y:Math.random()*H, s:8+Math.random()*16, v:8+Math.random()*24, c:COLS[i%7]});
+  (function loop(){ cx.clearRect(0,0,W,H); for(const p of cells){ p.y+=p.v/60*4; if(p.y>H+20){p.y=-20; p.x=Math.random()*W;} cx.fillStyle=p.c; cx.globalAlpha=.5; cx.fillRect(p.x,p.y,p.s,p.s);} cx.globalAlpha=1; requestAnimationFrame(loop); })();
+})();
+
+// ---------- câblage UI ----------
+$('go').onclick = ()=>{ NODE = $('node').value.trim() || defaultNode(); localStorage.setItem('flous.node', NODE); refreshStatus(); if(WALLET) refreshAccount(); };
+$('node').addEventListener('keydown', e=>{ if(e.key==='Enter') $('go').click(); });
+
+$('btnCreate').onclick = async ()=>{
+  try{ const kp = await generateKey(); WALLET=kp;
+    $('newAddr').innerHTML = await addrDisplay(kp.address);
+    $('newSeed').textContent = kp.seedHex;
+    show($('newKeyBox'), true); show($('importBox'), false);
+  }catch(e){ alert('création impossible : '+e.message); }
+};
+$('btnImport').onclick = ()=>{ show($('importBox'), true); show($('newKeyBox'), false); $('importMsg').textContent=''; $('importSeed').value=''; $('importSeed').focus(); };
+$('btnCancelImport').onclick = ()=> show($('importBox'), false);
+$('btnDoImport').onclick = async ()=>{
+  $('importMsg').textContent='';
+  const s = ($('importSeed').value||'').trim().toLowerCase();
+  if(!/^[0-9a-f]{64}$/.test(s)){ $('importMsg').textContent='clé privée invalide : 64 caractères hexadécimaux attendus'; return; }
+  try{ const kp = await keyFromSeed(hexToBytes(s)); await enterWallet(kp); }
+  catch(e){ $('importMsg').textContent = 'import impossible : '+e.message; }
+};
+$('btnCopySeed').onclick = ()=> navigator.clipboard && navigator.clipboard.writeText($('newSeed').textContent);
+$('btnSeedSaved').onclick = async ()=>{ show($('newKeyBox'), false); await enterWallet(WALLET); };
+
+$('btnUnlock').onclick = async ()=>{
+  $('unlockMsg').textContent='';
+  try{ const kp = await unlockWallet($('unlockPwd').value); $('unlockPwd').value=''; await enterWallet(kp); }
+  catch(e){ $('unlockMsg').textContent = e.message; }
+};
+$('unlockPwd').addEventListener('keydown', e=>{ if(e.key==='Enter') $('btnUnlock').click(); });
+$('btnForget').onclick = ()=>{ if(confirm("Oublier le portefeuille enregistré dans ce navigateur ? Assurez-vous d'avoir sauvegardé la clé privée.")){ localStorage.removeItem('flous.wallet'); loadSavedBox(); } };
+
+$('btnCopyAddr').onclick = async ()=>{ const c = await toChecksummed(WALLET.address); if(navigator.clipboard) navigator.clipboard.writeText(c); };
+$('btnSave').onclick = async ()=>{
+  const pwd = prompt("Choisissez un mot de passe pour chiffrer ce portefeuille dans ce navigateur :");
+  if(!pwd) return;
+  try{ await saveWallet(pwd); $('saveMsg').textContent='✔ portefeuille chiffré et enregistré dans ce navigateur'; }
+  catch(e){ $('saveMsg').className='err'; $('saveMsg').textContent='✖ '+e.message; }
+};
+$('btnReveal').onclick = ()=>{ const b=$('revealBox'); const showing=!b.classList.contains('hide'); if(showing){ show(b,false); } else { $('revealSeed').textContent=WALLET.seedHex; show(b,true);} };
+$('btnLock').onclick = lockWallet;
+$('btnSend').onclick = doSend;
+
+// ---------- démarrage ----------
+if(!CRYPTO_OK){ show($('unsupported'), true); ['btnCreate','btnImport','btnDoImport','btnSend'].forEach(id=>{ const el=$(id); if(el) el.disabled=true; }); }
+loadSavedBox();
+refreshStatus();
+setInterval(refreshStatus, 15000);
+</script>
+</body>
+</html>
