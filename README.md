@@ -702,3 +702,7 @@ fichier tronquée réparée ; corruption ailleurs refusée ; écritures atomique
 | Logique des packs de jeu | Le champ `data` et le modèle de comptes sont prêts ; un pack sera un enregistrement attaché à un compte. |
 | Attaque majoritaire | Limite intrinsèque de la preuve de travail : qui contrôle la majorité de la puissance de calcul peut réécrire l'historique (démo 6g). La parade est le nombre de confirmations, pas le code. |
 | Sécurité de la clé privée | Le wallet chiffre la clé au repos, mais c'est une limite intrinsèque : une clé volée déchiffrée (ou un mot de passe capté) permet de signer au nom de son propriétaire, dans la limite de son solde. |
+
+## Licence
+
+MIT — voir [LICENSE](LICENSE). Projet pédagogique : à utiliser, étudier et modifier librement.
