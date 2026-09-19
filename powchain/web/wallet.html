@@ -188,6 +188,15 @@
     </div>
 
     <div class="card">
+      <h2>▚ MINAGE</h2>
+      <p class="muted" id="mineInfo">minage : —</p>
+      <div class="row"><button id="btnMine" class="cy">MINER VERS CE PORTEFEUILLE</button></div>
+      <div id="mineMsg" style="margin-top:8px"></div>
+      <p class="muted" style="margin-top:10px">Uniquement sur votre propre nœud (celui que <span class="mono">FLOUS.exe</span> a
+        ouvert sur cet ordinateur) — pas via un nœud distant comme le nœud public partagé.</p>
+    </div>
+
+    <div class="card">
       <h2>▚ ENVOYER DES FLS</h2>
       <label class="fld"><span class="k">DESTINATAIRE (ADRESSE 64 HEX)</span>
         <input type="text" id="to" placeholder="adresse du destinataire" spellcheck="false"></label>
@@ -357,6 +366,38 @@ function renderHistory(h){
 }
 function escapeHtml(s){ return String(s).replace(/[&<>"]/g, c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
 
+// ---------- minage (un clic, sans redémarrer le nœud) ----------
+async function refreshMining(){
+  if(!WALLET) return;
+  const btn = $('btnMine');
+  try{
+    const s = await api('/status');
+    if(s.mining && s.miner_address === WALLET.address){
+      $('mineInfo').innerHTML = `<span class="ok">● minage actif vers ce portefeuille</span> — ${s.blocks_mined||0} bloc(s) trouvé(s) ici`;
+      btn.textContent = 'ARRÊTER LE MINAGE'; btn.className = 'danger'; btn.dataset.action = 'stop';
+    }else if(s.mining){
+      $('mineInfo').innerHTML = `minage actif sur ce nœud, mais vers une autre adresse (${short(s.miner_address,8)})`;
+      btn.textContent = 'MINER ICI À LA PLACE'; btn.className = 'cy'; btn.dataset.action = 'start';
+    }else{
+      $('mineInfo').textContent = 'minage inactif sur ce nœud';
+      btn.textContent = 'MINER VERS CE PORTEFEUILLE'; btn.className = 'cy'; btn.dataset.action = 'start';
+    }
+  }catch(e){ $('mineInfo').textContent = 'minage : nœud injoignable'; }
+}
+$('btnMine').onclick = async ()=>{
+  const btn = $('btnMine'); btn.disabled = true;
+  $('mineMsg').className=''; $('mineMsg').textContent='';
+  try{
+    const stop = btn.dataset.action === 'stop';
+    const body = jsonWithBigInts(stop ? {} : {address: WALLET.address});
+    await api('/miner', {method:'POST', headers:{'Content-Type':'application/json','Accept':'application/json'}, body});
+    $('mineMsg').className='ok';
+    $('mineMsg').textContent = stop ? '✔ minage arrêté' : '✔ minage démarré vers ce portefeuille';
+    await refreshMining();
+  }catch(e){ $('mineMsg').className='err'; $('mineMsg').textContent = '✖ '+e.message; }
+  finally{ btn.disabled = false; }
+};
+
 // ---------- écrans ----------
 async function enterWallet(kp){
   WALLET = kp;
@@ -366,8 +407,9 @@ async function enterWallet(kp){
   $('to').value=''; $('amount').value=''; $('data').value='';
   if(!$('fee').value) $('fee').value = fmtFLS(MIN_FEE);
   await refreshAccount();
+  await refreshMining();
   if(pollTimer) clearInterval(pollTimer);
-  pollTimer = setInterval(()=>{ refreshStatus(); refreshAccount(); }, 6000);
+  pollTimer = setInterval(()=>{ refreshStatus(); refreshAccount(); refreshMining(); }, 6000);
 }
 async function addrDisplay(addr){ const c = await toChecksummed(addr); return `<b>${c}</b>`; }
 function lockWallet(){

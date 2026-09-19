@@ -30,6 +30,8 @@ Routes (réponses JSON ; montants en UNITÉS entières, voir money.py) :
     GET  /accounts/<adresse>/transactions?limit=20&offset=0   historique, plus récent d'abord
     GET  /mempool                   transactions en attente, meilleurs payeurs d'abord
     GET  /peers                     pairs connectés, carnet d'adresses, bans
+    POST /miner                     {"address": ...} démarre/change le minage local ; {} l'arrête
+                                     (403 hors de 127.0.0.1 : on ne détourne pas le minage d'un nœud distant)
 
 Erreurs : {"error": "..."} avec 400 (requête ou transaction invalide), 404
 (inconnu), 405 (méthode), 413 (corps trop gros), 500 (bug interne, journalisé,
@@ -56,7 +58,7 @@ from .crypto import is_valid_hash_hex
 from .errors import CodecError, InvalidTransactionError, MempoolError
 from .money import COIN_NAME, COIN_SYMBOL, UNITS_PER_COIN
 from .network import ALL_INTERFACES, NodeServer, local_ip_addresses
-from .protocol import PROTOCOL_VERSION, format_address
+from .protocol import LOOPBACK, PROTOCOL_VERSION, format_address, host_scope
 from .transaction import Transaction
 
 API_VERSION = 1
@@ -92,6 +94,7 @@ ROUTES = (
     "GET /accounts/<adresse>/transactions?limit=20&offset=0",
     "GET /mempool",
     "GET /peers",
+    "POST /miner  {\"address\": ...} démarre/change le minage local ; {} l'arrête (127.0.0.1 uniquement)",
 )
 
 
@@ -167,6 +170,7 @@ class Request:
     query: dict[str, list[str]]
     body: bytes
     accept: str = ""  # en-tête Accept : sert à servir le HTML aux navigateurs et le JSON aux clients API
+    client_host: str = ""  # adresse IP de la connexion TCP (jamais falsifiable par des en-têtes) ; sert à POST /miner
 
 
 @dataclass(slots=True)
@@ -248,6 +252,8 @@ class ApiServer:
             except (asyncio.TimeoutError, asyncio.IncompleteReadError, ConnectionError, OSError):
                 return
             else:
+                peername = writer.get_extra_info("peername")
+                request.client_host = peername[0] if peername else ""
                 response = await self._dispatch(request)
             await _write_response(writer, response, head_only=request is not None and request.method == "HEAD")
         except (ConnectionError, OSError):
@@ -308,6 +314,10 @@ class ApiServer:
             return self._get_only(reading, self._mempool)
         if head == "peers" and not rest:
             return self._get_only(reading, self._peers)
+        if head == "miner" and not rest:
+            if reading:
+                raise ApiError(405, 'POST /miner {"address": ...} démarre le minage local ; {} l\'arrête')
+            return await self._post_miner(request)
         raise ApiError(404, f"route inconnue : {request.path}")
 
     @staticmethod
@@ -429,6 +439,29 @@ class ApiServer:
                 "projected_next_sequence": projected.next_sequence_of(transaction.sender),
             },
         )
+
+    async def _post_miner(self, request: Request) -> Response:
+        """Démarre, change ou arrête le minage LOCAL de ce nœud (portefeuille web : un clic, pas de redémarrage).
+
+        Restreint à 127.0.0.1 : miner vers une adresse n'exige que la clé PUBLIQUE (aucun mot
+        de passe, cf. node --mine-label), donc n'importe qui pourrait sinon rediriger vers sa
+        propre adresse le minage d'un nœud exposé par --public. Chacun ne dirige que le sien.
+        """
+        if host_scope(request.client_host) != LOOPBACK:
+            raise ApiError(403, "changer la cible de minage n'est permis que depuis cette machine (127.0.0.1)")
+        try:
+            data = json.loads(request.body.decode("utf-8")) if request.body else {}
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            raise ApiError(400, "corps illisible : JSON attendu") from None
+        if not isinstance(data, dict):
+            raise ApiError(400, 'corps JSON attendu : {"address": "..."} ou {} pour arrêter')
+        raw_address = data.get("address")
+        if raw_address is None:
+            await self.server.stop_mining()
+            return Response(200, {"mining": False, "address": None})
+        address = _parse_address(raw_address)
+        self.server.start_mining(address)
+        return Response(200, {"mining": True, "address": address, "checksummed": to_checksummed_address(address)})
 
     def _account(self, raw: str) -> dict:
         address = _parse_address(raw)

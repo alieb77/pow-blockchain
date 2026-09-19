@@ -72,7 +72,11 @@ l'explorateur, sans rien installer :
 1. Télécharger `FLOUS.exe` depuis la page **Releases** du dépôt.
 2. Double-cliquer. Le nœud rejoint le réseau FLOUS et l'explorateur de blocs
    s'ouvre sur `http://127.0.0.1:8000/`.
-3. Fermer la fenêtre pour arrêter le nœud.
+3. Dans l'explorateur, aller sur **▚ PORTEFEUILLE** (`/wallet`), créer une
+   adresse, puis cliquer sur **« MINER VERS CE PORTEFEUILLE »** : le nœud
+   commence à miner immédiatement vers cette adresse, sans redémarrer et sans
+   ligne de commande (voir « Miner en un clic »).
+4. Fermer la fenêtre pour arrêter le nœud.
 
 Par défaut le nœud n'ouvre que des connexions **sortantes** (aucune demande de
 pare-feu). Pour devenir un nœud public accessible de l'extérieur, le lancer avec
@@ -598,6 +602,23 @@ Limite honnête (démo 10c) : le nœud n'a lu que la partie **publique** du
 wallet ; **dépenser** les coins minés demande toujours le mot de passe (pour
 signer). Un nœud public qui mine pour vous ne peut donc pas toucher à votre solde.
 
+### Miner en un clic (portefeuille web)
+
+Pour un non-développeur, changer la cible de minage **sans redémarrer le
+nœud** ni toucher à une ligne de commande : le portefeuille web (`/wallet`)
+affiche un bouton **« MINER VERS CE PORTEFEUILLE »** qui appelle
+`POST /miner {"address": ...}` — le même mécanisme que `--mine-label`
+(seule l'adresse publique est nécessaire), mais déclenché à chaud pendant que
+le nœud tourne déjà. `POST /miner {}` arrête le minage. La page interroge
+`/status` en continu pour afficher l'état (actif vers ce portefeuille, actif
+vers une autre adresse, ou inactif) et le nombre de blocs trouvés.
+
+Cette route est **refusée avec 403 en dehors de 127.0.0.1** : miner vers une
+adresse ne demandant aucun mot de passe, l'ouvrir sans cette restriction
+permettrait à n'importe qui joignant un nœud `--public` de rediriger son
+minage vers sa propre adresse. Chacun ne peut donc changer la cible que de
+**son propre** nœud, jamais de celui d'un autre.
+
 ## Frais de transaction (Partie 11)
 
 Chaque transaction porte un champ `fee` (unités), **signé** avec le reste :
@@ -663,6 +684,7 @@ fil supplémentaire, donc pas de verrou à ajouter au `Node`).
 | `GET /accounts/<adresse>/transactions?limit=20&offset=0` | historique (plus récent d'abord) et transactions en attente |
 | `GET /mempool` | transactions en attente, meilleurs payeurs d'abord, total des frais |
 | `GET /peers` | pairs connectés (id, hôte, port, sens, hauteur), carnet, amorces, adresses propres, bans |
+| `POST /miner` | corps `{"address": ...}` démarre/change le minage local, `{}` l'arrête ; `403` hors de `127.0.0.1` (voir « Miner en un clic ») |
 
 Pour que ça marche, `Blockchain` tient deux index en mémoire, reconstruits
 avec la chaîne (donc cohérents après une réorganisation) : hash de transaction
@@ -674,7 +696,10 @@ transaction reçue est traitée exactement comme si un pair l'avait envoyée
 (règles R, S, M puis diffusion). Exposer l'API avec `--public` n'expose aucun
 fonds. `Access-Control-Allow-Origin: *` sur toutes les réponses permet à une
 page web servie d'ailleurs d'interroger un nœud ; sans cookie ni session, une
-page tierce n'a rien à voler.
+page tierce n'a rien à voler. Seule exception à « lecture publique, écriture
+sans risque » : `POST /miner` change où vont les **futures** récompenses de
+minage de **ce nœud**, donc réservé à `127.0.0.1` (403 sinon), même avec
+`--public`.
 
 Limites : pas de HTTPS ni d'authentification (données publiques ; pour
 Internet, un proxy devant ou `--no-api`), pas de limite de débit par client
@@ -772,6 +797,10 @@ fichier tronquée réparée ; corruption ailleurs refusée ; écritures atomique
 - Minage vers son wallet : `node --mine-label` résout une clé du wallet en
   adresse publique (sans mot de passe) et empile les coinbases dedans ; dépenser
   demande toujours la clé privée (section 10 de `main.py`).
+- Miner en un clic : `POST /miner` change à chaud la cible de minage sans
+  redémarrer le nœud, réservé à `127.0.0.1` ; un bouton du portefeuille web
+  l'utilise pour miner vers son adresse sans ligne de commande
+  (`tests/test_api.py`).
 - Ouverture au réseau : `node --public` écoute sur toutes les interfaces ;
   portée des adresses (rien de local ne sort de la machine, rien de privé ne
   sort du réseau local), adresse propre apprise par le `hello` à soi-même,

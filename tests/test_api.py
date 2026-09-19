@@ -4,7 +4,7 @@ import asyncio
 import json
 import unittest
 
-from powchain.api import MAX_BODY_BYTES, ApiServer
+from powchain.api import MAX_BODY_BYTES, ApiServer, Request
 from powchain.address import to_checksummed_address
 from powchain.codec import transaction_to_dict
 from powchain.money import MIN_RELAY_FEE, block_reward
@@ -247,6 +247,59 @@ class WriteRoutesTests(ApiFixture):
         self.assertEqual(status, 400)
         self.assertIn("solde insuffisant", data["error"])
         self.assertEqual(len(self.node.mempool), 0)
+
+
+class MinerRouteTests(ApiFixture):
+    """POST /miner (portefeuille web : miner en un clic, sans redémarrer le nœud)."""
+
+    async def test_post_miner_starts_changes_then_stops_mining(self):
+        status, _, data = await self.post("/miner", {"address": MINER.address})
+        self.assertEqual(status, 200)
+        self.assertTrue(data["mining"])
+        self.assertEqual(data["address"], MINER.address)
+        self.assertEqual(data["checksummed"], to_checksummed_address(MINER.address))
+        self.assertTrue(self.server.mining)
+        self.assertEqual(self.node.miner_address, MINER.address)
+
+        # Changer de cible sans redémarrer : le nœud continue de miner, vers la nouvelle adresse.
+        status, _, data = await self.post("/miner", {"address": ALICE.address})
+        self.assertEqual(status, 200)
+        self.assertEqual(self.node.miner_address, ALICE.address)
+        self.assertTrue(self.server.mining)
+
+        status, _, data = await self.post("/miner", {})
+        self.assertEqual(status, 200)
+        self.assertFalse(data["mining"])
+        self.assertIsNone(data["address"])
+        self.assertFalse(self.server.mining)
+
+    async def test_post_miner_accepts_checksummed_address(self):
+        status, _, data = await self.post("/miner", {"address": to_checksummed_address(MINER.address)})
+        self.assertEqual(status, 200)
+        self.assertEqual(data["address"], MINER.address)
+
+    async def test_post_miner_rejects_invalid_address(self):
+        status, _, data = await self.post("/miner", {"address": "pas-une-adresse"})
+        self.assertEqual(status, 400)
+        self.assertFalse(self.server.mining)
+
+    async def test_post_miner_rejects_malformed_body(self):
+        status, _, data = await self.post("/miner", ["pas", "un", "objet"])
+        self.assertEqual(status, 400)
+
+    async def test_post_miner_rejected_from_outside_localhost(self):
+        """Un nœud --public ne doit pas laisser n'importe qui détourner son minage vers sa propre adresse."""
+        request = Request(
+            method="POST",
+            path="/miner",
+            query={},
+            body=json.dumps({"address": MINER.address}).encode("utf-8"),
+            client_host="203.0.113.5",  # TEST-NET-3 (RFC 5737) : adresse publique de démonstration
+        )
+        response = await self.api._dispatch(request)
+        self.assertEqual(response.status, 403)
+        self.assertFalse(self.server.mining)
+        self.assertIsNone(self.node.miner_address)
 
 
 class HttpEdgeCaseTests(ApiFixture):
