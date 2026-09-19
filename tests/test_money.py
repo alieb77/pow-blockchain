@@ -26,9 +26,9 @@ class AmountTests(unittest.TestCase):
             parse_coin_amount(1.5)
 
     def test_format_units(self):
-        self.assertEqual(format_units(150_000_000), "1.50000000 COIN")
-        self.assertEqual(format_units(0), "0.00000000 COIN")
-        self.assertEqual(format_units(1), "0.00000001 COIN")
+        self.assertEqual(format_units(150_000_000), "1.50000000 FLS")
+        self.assertEqual(format_units(0), "0.00000000 FLS")
+        self.assertEqual(format_units(1), "0.00000001 FLS")
         with self.assertRaises(ValueError):
             format_units(-1)
 

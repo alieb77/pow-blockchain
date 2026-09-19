@@ -148,6 +148,18 @@ DIAL_GRACE_SECONDS = 30  # appel sans nouvelle du transport au bout de ce délai
 BAN_SECONDS = 600  # durée du bannissement d'un hôte fautif
 MAX_BANS = 256  # hôtes bannis mémorisés au plus
 
+# Limite de débit par pair (anti-spam applicatif, avant l'ouverture à un large
+# public). Le ban punit déjà les messages *invalides* ; il ne freine pas un
+# pair qui inonde de messages *valides* (transactions redondantes, get_account,
+# get_blocks en boucle) et coûte CPU + bande passante à tout le monde. On
+# applique donc un seau à jetons par connexion : chaque message reçu consomme
+# un jeton ; le seau se remplit de MESSAGE_RATE jetons par seconde, plafonné à
+# MESSAGE_BURST. Une rafale légitime (poignée de main, découverte, rattrapage)
+# passe sans encombre ; un flot soutenu qui vide le seau vaut une faute (comme
+# une ligne illisible) : déconnexion et ban de l'hôte (jamais la boucle locale).
+MESSAGE_RATE = 32  # jetons rendus par seconde : débit soutenu maximal par pair
+MESSAGE_BURST = 128  # capacité du seau : rafale tolérée d'un coup (poignée de main, découverte, sync)
+
 
 @dataclass(frozen=True, slots=True)
 class Send:
@@ -221,6 +233,8 @@ class Peer:
     height: int = 0
     work: int = 0
     tip_hash: str = ""
+    tokens: float = 0.0  # jetons de débit restants (seau à jetons, voir Node.on_message)
+    last_refill: float = 0.0  # instant du dernier remplissage du seau
 
     @property
     def ready(self) -> bool:
@@ -260,6 +274,8 @@ class Node:
         min_fee: int = MIN_RELAY_FEE,
         max_peers: int = MAX_PEERS,
         max_inbound: int = MAX_INBOUND,
+        message_rate: float = MESSAGE_RATE,
+        message_burst: float = MESSAGE_BURST,
         log: Callable[[str], None] | None = None,
     ) -> None:
         if miner_address is not None and not is_valid_address(miner_address):
@@ -273,6 +289,8 @@ class Node:
         self._clock = clock
         self._max_peers = max_peers
         self._max_inbound = max_inbound
+        self._message_rate = message_rate
+        self._message_burst = message_burst
         self._log = log if log is not None else (lambda text: None)
         self._peers: dict[object, Peer] = {}
         self._syncs: dict[object, SyncState] = {}
@@ -411,7 +429,9 @@ class Node:
             self.stats["inbound_refused"] += 1
             self._log(f"connexion entrante de {host} refusée : déjà {self._max_inbound} connexion(s) entrante(s)")
             return [Disconnect(peer_id, f"plus de {self._max_inbound} connexions entrantes")]
-        self._peers[peer_id] = Peer(peer_id, host, outbound, dialed_address=address)
+        self._peers[peer_id] = Peer(
+            peer_id, host, outbound, dialed_address=address, tokens=self._message_burst, last_refill=self._clock()
+        )
         if address is not None and address not in self._own_addresses:
             self._remember_address(address)
         return [Send(peer_id, self.hello())]
@@ -434,6 +454,8 @@ class Node:
         peer = self._peers.get(peer_id)
         if peer is None:
             return []
+        if not self._admit(peer):
+            return self._punish(peer, "limite de débit dépassée (trop de messages)")
         try:
             validate_message(msg)
         except ProtocolError as error:
@@ -844,6 +866,29 @@ class Node:
         delay = min(RECONNECT_BASE_DELAY * 2 ** (failures - 1), RECONNECT_MAX_DELAY)
         self._retry_at[address] = self.now() + delay
         self._log(f"{address} {why} (échec n°{failures}) : nouvel essai dans {delay} s")
+
+    def _admit(self, peer: Peer) -> bool:
+        """Seau à jetons par pair : True si le message tient dans la limite de débit, False sinon.
+
+        Le seau se remplit de `message_rate` jetons par seconde (plafond
+        `message_burst`) et chaque message consomme un jeton. Une rafale
+        légitime (poignée de main, découverte, rattrapage) puise dans le
+        seau plein ; un flot soutenu qui le vide n'a plus de jeton : le
+        message est refusé et l'appelant (on_message) le traite comme une
+        faute (déconnexion + ban de l'hôte, sauf boucle locale).
+        """
+        if self._message_rate <= 0:
+            return True  # limite de débit désactivée (message_rate=0)
+        now = self._clock()
+        elapsed = now - peer.last_refill
+        if elapsed > 0:
+            peer.tokens = min(self._message_burst, peer.tokens + elapsed * self._message_rate)
+            peer.last_refill = now
+        if peer.tokens < 1.0:
+            self.stats["rate_limited"] += 1
+            return False
+        peer.tokens -= 1.0
+        return True
 
     def _punish(self, peer: Peer, reason: str) -> list[Action]:
         """Pair fautif : déconnexion, et bannissement de son hôte (sauf boucle locale : nos propres processus)."""

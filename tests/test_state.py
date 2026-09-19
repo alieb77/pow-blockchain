@@ -117,7 +117,7 @@ class StateTests(unittest.TestCase):
         self.assertEqual(funded_state(), funded_state())
         self.assertNotEqual(funded_state(), State())
         self.assertIn("1 comptes", repr(funded_state()))
-        self.assertIn("50.00000000 COIN", repr(funded_state()))
+        self.assertIn("50.00000000 FLS", repr(funded_state()))
 
 
 if __name__ == "__main__":

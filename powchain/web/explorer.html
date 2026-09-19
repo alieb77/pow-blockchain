@@ -1,0 +1,410 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>FLOUS Explorer</title>
+<meta name="description" content="Explorateur de blocs FLOUS (FLS) — la chaîne Proof of Work qui vit, façon Tetris.">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Press+Start+2P&family=VT323&display=swap" rel="stylesheet">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Crect width='100' height='100' fill='%2310121c'/%3E%3Crect x='12' y='12' width='34' height='34' fill='%2300f0f0'/%3E%3Crect x='54' y='12' width='34' height='34' fill='%23f0a000'/%3E%3Crect x='12' y='54' width='34' height='34' fill='%23a000f0'/%3E%3Crect x='54' y='54' width='34' height='34' fill='%23f00000'/%3E%3C/svg%3E">
+<style>
+  /* ---- Palette officielle des 7 pièces + fond sombre ---- */
+  :root{
+    --I:#00f0f0; --O:#f0f000; --T:#a000f0; --S:#00f000; --J:#2255f0; --Z:#f00000; --L:#f0a000;
+    --bg:#0b0d17; --bg2:#10121c; --panel:#161a2b; --panel2:#1d2233;
+    --ink:#e8ecff; --dim:#8b93b8; --line:#2a3150; --accent:#00f0f0;
+    --bevel-lt:rgba(255,255,255,.55); --bevel-dk:rgba(0,0,0,.55);
+  }
+  *{box-sizing:border-box}
+  html,body{margin:0;height:100%}
+  body{
+    background:var(--bg); color:var(--ink);
+    font-family:'VT323',monospace; font-size:20px; line-height:1.35;
+    overflow-x:hidden; position:relative; min-height:100%;
+  }
+  canvas#bg{position:fixed; inset:0; width:100%; height:100%; z-index:0; opacity:.25}
+  /* ---- Effet CRT : scanlines + vignette ---- */
+  .crt{position:fixed; inset:0; z-index:50; pointer-events:none;
+    background:repeating-linear-gradient(0deg, rgba(0,0,0,0) 0, rgba(0,0,0,0) 2px, rgba(0,0,0,.18) 3px, rgba(0,0,0,0) 4px);
+    mix-blend-mode:multiply;}
+  .crt::after{content:''; position:absolute; inset:0;
+    background:radial-gradient(ellipse at center, rgba(0,0,0,0) 55%, rgba(0,0,0,.45) 100%);}
+  .wrap{position:relative; z-index:10; max-width:1080px; margin:0 auto; padding:16px}
+
+  h1,h2,h3,.px{font-family:'Press Start 2P',monospace; letter-spacing:1px}
+  h1{font-size:26px; margin:.2em 0}
+  .tag{color:var(--dim); font-size:18px}
+
+  /* ---- Bloc en relief 3D (bevel) ---- */
+  .bevel{border-style:solid; border-width:4px;
+    border-color:var(--bevel-lt) var(--bevel-dk) var(--bevel-dk) var(--bevel-lt);
+    box-shadow:inset 0 0 0 2px rgba(0,0,0,.25);}
+  .brand-blocks{display:inline-grid; grid-template-columns:repeat(2,18px); grid-auto-rows:18px; gap:3px; vertical-align:middle; margin-right:12px}
+  .brand-blocks i{display:block}
+
+  header{display:flex; flex-wrap:wrap; align-items:center; gap:12px; margin-bottom:10px}
+  .title{display:flex; align-items:center; gap:6px}
+  .ticker{font-family:'Press Start 2P',monospace; font-size:12px; color:#0b0d17; background:var(--I); padding:6px 8px; }
+
+  .bar{display:flex; flex-wrap:wrap; gap:8px; align-items:center; margin:10px 0}
+  input[type=text]{background:#0a0c15; color:var(--ink); border:2px solid var(--line);
+    font-family:'VT323',monospace; font-size:18px; padding:8px 10px; min-width:0; flex:1}
+  button{font-family:'Press Start 2P',monospace; font-size:11px; cursor:pointer; color:#0b0d17;
+    background:var(--S); padding:10px 12px; border:0}
+  button:active{transform:translateY(2px)}
+  button.alt{background:var(--O)}
+  .dot{width:12px; height:12px; border-radius:50%; background:var(--Z); box-shadow:0 0 8px currentColor; color:var(--Z)}
+  .dot.ok{background:var(--S); color:var(--S)}
+  .status-line{color:var(--dim); font-size:17px}
+
+  /* ---- HUD ---- */
+  .hud{display:grid; grid-template-columns:repeat(3,1fr); gap:10px; margin:14px 0}
+  .hud .cell{background:var(--panel); padding:12px}
+  .hud .k{font-family:'Press Start 2P',monospace; font-size:9px; color:var(--dim)}
+  .hud .v{font-family:'Press Start 2P',monospace; font-size:18px; margin-top:8px; word-break:break-all}
+  .hud .cell:nth-child(1) .v{color:var(--O)}
+  .hud .cell:nth-child(2) .v{color:var(--I)}
+  .hud .cell:nth-child(3) .v{color:var(--S)}
+  .sub{display:grid; grid-template-columns:repeat(3,1fr); gap:10px; margin-bottom:14px}
+  .sub .cell{background:var(--panel2); padding:8px 10px; font-size:17px}
+  .sub .k{font-family:'Press Start 2P',monospace; font-size:8px; color:var(--dim)}
+  .sub .v{margin-top:4px}
+
+  .cols{display:grid; grid-template-columns:1.4fr 1fr; gap:14px; align-items:start}
+  @media(max-width:820px){.cols{grid-template-columns:1fr} .hud{grid-template-columns:1fr}}
+  .card{background:var(--panel); padding:12px; margin-bottom:14px}
+  .card h2{font-size:12px; margin:0 0 10px; color:var(--accent)}
+
+  /* ---- La pile de blocs facon Tetris ---- */
+  .well{display:flex; flex-direction:column; gap:6px}
+  .block{position:relative; padding:10px 12px; cursor:pointer; color:#08101a;
+    animation:drop .32s cubic-bezier(.2,1.4,.4,1)}
+  @keyframes drop{from{transform:translateY(-26px); opacity:0} to{transform:translateY(0); opacity:1}}
+  .block .row1{display:flex; justify-content:space-between; align-items:baseline; gap:8px}
+  .block .idx{font-family:'Press Start 2P',monospace; font-size:14px}
+  .block .meta{font-size:16px; opacity:.85}
+  .block .hash{font-size:15px; word-break:break-all; opacity:.8}
+  .block:hover{filter:brightness(1.08)}
+  .block.new{outline:3px solid #fff; outline-offset:-3px}
+
+  .kv{display:flex; justify-content:space-between; gap:10px; padding:4px 0; border-bottom:1px dashed var(--line)}
+  .kv .k{color:var(--dim)} .kv .v{text-align:right; word-break:break-all}
+  .mono{font-size:16px}
+  .tx{background:var(--panel2); padding:8px 10px; margin:6px 0; border-left:4px solid var(--T)}
+  .tx.coinbase{border-left-color:var(--O)}
+  .pill{display:inline-block; font-family:'Press Start 2P',monospace; font-size:8px; padding:3px 5px; color:#08101a; background:var(--S)}
+  .pill.pending{background:var(--O)} .pill.coinbase{background:var(--I)}
+  a.link{color:var(--I); cursor:pointer; text-decoration:underline}
+  .empty{color:var(--dim); font-style:normal; padding:8px 0}
+  .err{color:var(--Z)}
+  footer{color:var(--dim); font-size:16px; text-align:center; margin:24px 0 8px}
+  .clickable{cursor:pointer}
+  .flash{animation:flash .6s ease}
+  @keyframes flash{0%{background:var(--S)} 100%{}}
+  #detail:empty{display:none}
+</style>
+</head>
+<body>
+<canvas id="bg"></canvas>
+<div class="crt"></div>
+
+<div class="wrap">
+  <header>
+    <span class="brand-blocks" aria-hidden="true">
+      <i style="background:var(--I)" class="bevel"></i><i style="background:var(--O)" class="bevel"></i>
+      <i style="background:var(--T)" class="bevel"></i><i style="background:var(--L)" class="bevel"></i>
+    </span>
+    <div class="title">
+      <h1>FLOUS</h1><span class="ticker bevel">FLS</span>
+    </div>
+    <span style="flex:1"></span>
+    <span class="dot" id="dot" title="etat de la connexion"></span>
+    <span class="status-line" id="conn">connexion…</span>
+  </header>
+
+  <div class="bar">
+    <input type="text" id="node" placeholder="http://adresse-du-noeud:8000" spellcheck="false">
+    <button id="go">CONNECTER</button>
+    <button id="sound" class="alt" title="son 8-bit">SON: OFF</button>
+  </div>
+
+  <div class="hud">
+    <div class="cell bevel"><div class="k">SCORE — masse (FLS)</div><div class="v" id="supply">—</div></div>
+    <div class="cell bevel"><div class="k">LINES — hauteur</div><div class="v" id="height">—</div></div>
+    <div class="cell bevel"><div class="k">LEVEL — difficulte</div><div class="v" id="difficulty">—</div></div>
+  </div>
+  <div class="sub">
+    <div class="cell"><div class="k">PAIRS</div><div class="v" id="peers">—</div></div>
+    <div class="cell"><div class="k">MEMPOOL</div><div class="v" id="mempool">—</div></div>
+    <div class="cell"><div class="k">TRAVAIL CUMULE</div><div class="v mono" id="work">—</div></div>
+  </div>
+
+  <div class="bar">
+    <input type="text" id="search" placeholder="chercher : adresse (64 hex) ou hash de transaction / n° de bloc" spellcheck="false">
+    <button id="find" class="alt">CHERCHER</button>
+  </div>
+
+  <div id="detail"></div>
+
+  <div class="cols">
+    <div class="card">
+      <h2>▚ BLOCS RÉCENTS</h2>
+      <div class="well" id="blocks"><div class="empty">chargement…</div></div>
+    </div>
+    <div>
+      <div class="card">
+        <h2>▚ MEMPOOL</h2>
+        <div id="pool"><div class="empty">—</div></div>
+      </div>
+      <div class="card">
+        <h2>▚ PAIRS</h2>
+        <div id="peerlist"><div class="empty">—</div></div>
+      </div>
+    </div>
+  </div>
+
+  <footer>
+    FLOUS (FLS) — chaîne Proof of Work · moteur <b>powchain</b> · licence MIT<br>
+    <span id="engine"></span>
+  </footer>
+</div>
+
+<script>
+"use strict";
+const COLORS = ['--I','--O','--T','--S','--J','--Z','--L'];
+const $ = id => document.getElementById(id);
+const short = (s,n=10) => (s && s.length>n*2) ? s.slice(0,n)+'…'+s.slice(-6) : (s||'');
+const cvar = v => getComputedStyle(document.documentElement).getPropertyValue(v).trim();
+// La tête d'un hash PoW est toujours "0000…" (preuve de travail) : on colore
+// donc à partir de la QUEUE, bien répartie, pour obtenir les 7 couleurs de pièces.
+function colorOf(hash){ const h = parseInt((hash||'0').slice(-6),16)||0; return COLORS[h % 7]; }
+function fmtFLS(units){ const u = Number(units||0); return (u/1e8).toLocaleString('fr-FR',{maximumFractionDigits:8}); }
+function fmtTime(ts){ try{ return new Date(ts*1000).toLocaleString('fr-FR'); }catch(e){ return ts; } }
+
+// ---- Adresse du noeud : l'origine si la page est servie par un noeud, sinon l'amorce publique.
+const BOOTNODE = 'http://51.170.139.244:8000';
+function defaultNode(){
+  if(location.protocol === 'http:' || location.protocol === 'https:'){
+    if(location.hostname) return location.origin;
+  }
+  return BOOTNODE;
+}
+let NODE = localStorage.getItem('flous.node') || defaultNode();
+$('node').value = NODE;
+
+async function api(path){
+  const base = NODE.replace(/\/+$/,'');
+  const r = await fetch(base + path, {headers:{'Accept':'application/json'}, cache:'no-store'});
+  if(!r.ok){ let e; try{ e=(await r.json()).error }catch(_){}; throw new Error(e || ('HTTP '+r.status)); }
+  return r.json();
+}
+
+// ---------- Son 8-bit (WebAudio) ----------
+let AC=null, SOUND=false;
+function beep(freq, dur=0.08, type='square', vol=0.08){
+  if(!SOUND) return;
+  try{
+    AC = AC || new (window.AudioContext||window.webkitAudioContext)();
+    const o=AC.createOscillator(), g=AC.createGain();
+    o.type=type; o.frequency.value=freq; o.connect(g); g.connect(AC.destination);
+    g.gain.setValueAtTime(vol, AC.currentTime);
+    g.gain.exponentialRampToValueAtTime(0.0001, AC.currentTime+dur);
+    o.start(); o.stop(AC.currentTime+dur);
+  }catch(e){}
+}
+const sfxClick   = ()=>{ beep(440,0.05); };
+const sfxNew     = ()=>{ beep(523,0.06); setTimeout(()=>beep(784,0.09),70); setTimeout(()=>beep(1046,0.11),150); };
+const sfxError   = ()=>{ beep(160,0.18,'sawtooth',0.06); };
+$('sound').onclick = () => { SOUND=!SOUND; $('sound').textContent='SON: '+(SOUND?'ON':'OFF'); if(SOUND){ try{AC=AC||new (window.AudioContext||window.webkitAudioContext)();}catch(e){} sfxClick(); } };
+
+// ---------- Rendu ----------
+let lastHeight = -1;
+function setConn(ok, text){
+  $('dot').className = 'dot' + (ok?' ok':'');
+  $('conn').textContent = text;
+}
+
+function blockBrick(b, isNew){
+  const col = cvar(colorOf(b.hash));
+  const el = document.createElement('div');
+  el.className = 'block bevel' + (isNew?' new':'');
+  el.style.background = col;
+  el.style.borderColor = 'var(--bevel-lt) var(--bevel-dk) var(--bevel-dk) var(--bevel-lt)';
+  el.innerHTML =
+    `<div class="row1"><span class="idx">#${b.index}</span>`+
+    `<span class="meta">${b.transactions} tx · ${fmtFLS(b.reward)} FLS · diff ${b.difficulty}</span></div>`+
+    `<div class="hash">${b.hash}</div>`+
+    `<div class="meta">mineur ${b.miner?short(b.miner,8):'—'} · ${fmtTime(b.timestamp)}</div>`;
+  el.onclick = () => { sfxClick(); showBlock(b.index); };
+  return el;
+}
+
+async function refresh(){
+  try{
+    const s = await api('/status');
+    setConn(true, `noeud ${short(s.node_id,6)} · en ligne`);
+    $('supply').textContent = fmtFLS(s.total_supply);
+    $('height').textContent = s.height;
+    $('difficulty').textContent = s.difficulty;
+    $('peers').textContent = `${s.peers} (${s.inbound}↓ / ${s.outbound}↑)`;
+    $('mempool').textContent = `${s.mempool} · min ${fmtFLS(s.min_fee)} FLS`;
+    $('work').textContent = s.work.toLocaleString('fr-FR');
+    $('engine').textContent = `moteur ${s.engine||'powchain'} v${s.api_version} · protocole ${s.protocol_version}` + (s.mining?` · ⛏ minage actif`:'') + ` · débit filtré: ${s.rate_limited||0}`;
+    const isNew = (lastHeight>=0 && s.height>lastHeight);
+    if(isNew){ sfxNew(); }
+    lastHeight = s.height;
+    await Promise.all([renderBlocks(s.height, isNew), renderPool(), renderPeers()]);
+  }catch(e){
+    setConn(false, 'hors ligne : '+e.message);
+    if(lastHeight!==-2){ sfxError(); lastHeight=-2; }
+  }
+}
+
+async function renderBlocks(height, flashTop){
+  const data = await api('/blocks?limit=15');
+  const well = $('blocks'); well.innerHTML='';
+  if(!data.blocks.length){ well.innerHTML='<div class="empty">chaîne vide (genesis seul)</div>'; }
+  data.blocks.forEach((b,i)=> well.appendChild(blockBrick(b, flashTop && i===0)));
+}
+
+async function renderPool(){
+  const data = await api('/mempool');
+  const box = $('pool');
+  if(!data.count){ box.innerHTML='<div class="empty">aucune transaction en attente</div>'; return; }
+  box.innerHTML = `<div class="status-line">${data.count} en attente · frais totaux ${fmtFLS(data.total_fees)} FLS</div>`;
+  data.transactions.slice(0,10).forEach(t=>{
+    const d=document.createElement('div'); d.className='tx';
+    d.innerHTML = `<span class="pill pending">PENDING</span> <span class="mono link">${short(t.hash,8)}</span><br>`+
+      `${short(t.sender,7)} → ${short(t.recipient,7)}<br>${fmtFLS(t.amount)} FLS · frais ${fmtFLS(t.fee)}`;
+    d.querySelector('.link').onclick=()=>{ sfxClick(); showTx(t.hash); };
+    box.appendChild(d);
+  });
+}
+
+async function renderPeers(){
+  const data = await api('/peers');
+  const box = $('peerlist');
+  if(!data.peers.length){ box.innerHTML='<div class="empty">aucun pair connecté</div>'; }
+  else{
+    box.innerHTML='';
+    data.peers.forEach(p=>{
+      const d=document.createElement('div'); d.className='kv';
+      d.innerHTML=`<span class="k">${p.outbound?'↑':'↓'} ${short(p.node_id||'?',6)}</span><span class="v mono">${p.host}:${p.listen_port||'?'} · h${p.height}</span>`;
+      box.appendChild(d);
+    });
+  }
+  const known = (data.known_addresses||[]).length, banned=(data.banned_hosts||[]).length;
+  box.insertAdjacentHTML('beforeend', `<div class="status-line" style="margin-top:8px">carnet ${known} · bannis ${banned}</div>`);
+}
+
+// ---------- Detail (bloc / compte / transaction) ----------
+function panel(title, html){
+  $('detail').innerHTML = `<div class="card"><h2>${title} <span class="link" id="clsd" style="float:right">✕ fermer</span></h2>${html}</div>`;
+  $('clsd').onclick=()=>{ sfxClick(); $('detail').innerHTML=''; };
+  $('detail').scrollIntoView({behavior:'smooth', block:'nearest'});
+}
+function txCard(t){
+  const cb = (t.sender === '0'.repeat(64));
+  return `<div class="tx ${cb?'coinbase':''}"><span class="pill ${cb?'coinbase':(t.status==='pending'?'pending':'')}">${cb?'COINBASE':(t.status||'tx').toUpperCase()}</span> `+
+    `<span class="mono">${short(t.hash,8)}</span><br>`+
+    `<span class="k" style="color:var(--dim)">de</span> ${cb?'— (création)':short(t.sender,10)}<br>`+
+    `<span class="k" style="color:var(--dim)">à</span> ${short(t.recipient,10)}<br>`+
+    `${fmtFLS(t.amount)} FLS${t.fee?(' · frais '+fmtFLS(t.fee)+' FLS'):''}${t.data?(' · data:'+t.data):''}</div>`;
+}
+async function showBlock(key){
+  try{
+    const b = await api('/blocks/'+key);
+    let h = `<div class="kv"><span class="k">index</span><span class="v">${b.index}</span></div>`+
+      `<div class="kv"><span class="k">hash</span><span class="v mono">${b.hash}</span></div>`+
+      `<div class="kv"><span class="k">précédent</span><span class="v mono">${b.prev_hash}</span></div>`+
+      `<div class="kv"><span class="k">horodatage</span><span class="v">${fmtTime(b.timestamp)}</span></div>`+
+      `<div class="kv"><span class="k">difficulté / nonce</span><span class="v">${b.difficulty} / ${b.nonce}</span></div>`+
+      `<div class="kv"><span class="k">confirmations</span><span class="v">${b.confirmations}</span></div>`+
+      `<div class="kv"><span class="k">frais du bloc</span><span class="v">${fmtFLS(b.fees)} FLS</span></div>`+
+      `<h3 style="font-size:11px;color:var(--accent);margin:12px 0 4px">TRANSACTIONS (${b.transactions.length})</h3>`;
+    b.transactions.forEach(t=> h += txCard(t));
+    panel('BLOC #'+b.index, h);
+  }catch(e){ panel('BLOC', `<div class="err">introuvable : ${e.message}</div>`); sfxError(); }
+}
+async function showAccount(addr){
+  try{
+    const a = await api('/accounts/'+addr);
+    const tx = await api('/accounts/'+addr+'/transactions?limit=15');
+    let h = `<div class="kv"><span class="k">adresse</span><span class="v mono">${a.checksummed||a.address}</span></div>`+
+      `<div class="kv"><span class="k">solde confirmé</span><span class="v">${fmtFLS(a.balance)} FLS</span></div>`+
+      `<div class="kv"><span class="k">solde projeté</span><span class="v">${fmtFLS(a.projected_balance)} FLS</span></div>`+
+      `<div class="kv"><span class="k">séquence suivante</span><span class="v">${a.next_sequence}</span></div>`+
+      `<div class="kv"><span class="k">transactions</span><span class="v">${a.transactions} (+${a.pending} en attente)</span></div>`+
+      `<h3 style="font-size:11px;color:var(--accent);margin:12px 0 4px">HISTORIQUE</h3>`;
+    const all = (tx.pending||[]).concat(tx.transactions||[]);
+    if(!all.length) h+='<div class="empty">aucune transaction</div>';
+    all.forEach(t=> h+=txCard(t));
+    panel('COMPTE', h);
+  }catch(e){ panel('COMPTE', `<div class="err">introuvable : ${e.message}</div>`); sfxError(); }
+}
+async function showTx(hash){
+  try{
+    const t = await api('/transactions/'+hash);
+    let h = txCard(t);
+    if(t.status==='confirmed') h+=`<div class="kv"><span class="k">bloc</span><span class="v link" onclick="showBlock(${t.block_index})">#${t.block_index} · ${t.confirmations} conf.</span></div>`;
+    panel('TRANSACTION', h);
+  }catch(e){ panel('TRANSACTION', `<div class="err">introuvable : ${e.message}</div>`); sfxError(); }
+}
+window.showBlock = showBlock;
+
+function doSearch(){
+  const q = $('search').value.trim();
+  if(!q) return;
+  sfxClick();
+  if(/^[0-9]+$/.test(q)) return showBlock(q);
+  if(/^[0-9a-fA-F]{64}$/.test(q)){
+    // 64 hex : peut être une adresse OU un hash de transaction. On tente compte puis transaction.
+    api('/accounts/'+q.toLowerCase()).then(()=>showAccount(q.toLowerCase())).catch(()=>showTx(q.toLowerCase()));
+    return;
+  }
+  // forme à somme de contrôle (mixte) : adresse
+  if(/^[0-9a-fA-F]{64}$/.test(q)) return showAccount(q);
+  showAccount(q);
+}
+
+// ---------- Connexion / rafraîchissement ----------
+function connect(){
+  NODE = $('node').value.trim() || defaultNode();
+  localStorage.setItem('flous.node', NODE);
+  lastHeight=-1; sfxClick(); refresh();
+}
+$('go').onclick = connect;
+$('node').addEventListener('keydown', e=>{ if(e.key==='Enter') connect(); });
+$('find').onclick = doSearch;
+$('search').addEventListener('keydown', e=>{ if(e.key==='Enter') doSearch(); });
+
+refresh();
+setInterval(refresh, 5000);
+
+// ---------- Fond animé : des pièces qui tombent (décoratif) ----------
+(function(){
+  const cv=$('bg'), ctx=cv.getContext('2d'); let W,H,cell=26,drops=[];
+  function resize(){ W=cv.width=innerWidth; H=cv.height=innerHeight; }
+  resize(); addEventListener('resize', resize);
+  const cols = COLORS.map(cvar);
+  function spawn(){ return {x:Math.floor(Math.random()*(W/cell))*cell, y:-cell, s:1+Math.random()*1.6, c:cols[Math.floor(Math.random()*7)]}; }
+  for(let i=0;i<40;i++){ const d=spawn(); d.y=Math.random()*H; drops.push(d); }
+  function tick(){
+    ctx.clearRect(0,0,W,H);
+    for(const d of drops){
+      d.y+=d.s;
+      if(d.y>H+cell){ Object.assign(d, spawn()); }
+      ctx.fillStyle=d.c;
+      ctx.fillRect(d.x,d.y,cell-3,cell-3);
+      ctx.fillStyle='rgba(255,255,255,.35)'; ctx.fillRect(d.x,d.y,cell-3,3);
+      ctx.fillStyle='rgba(0,0,0,.35)'; ctx.fillRect(d.x,d.y+cell-6,cell-3,3);
+    }
+    requestAnimationFrame(tick);
+  }
+  tick();
+})();
+</script>
+</body>
+</html>

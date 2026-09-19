@@ -84,7 +84,9 @@ class ReadRoutesTests(ApiFixture):
     async def test_index_and_status(self):
         status, headers, data = await self.get("/")
         self.assertEqual(status, 200)
-        self.assertEqual(data["name"], "powchain")
+        self.assertEqual(data["name"], "FLOUS")
+        self.assertEqual(data["coin_symbol"], "FLS")
+        self.assertEqual(data["engine"], "powchain")
         self.assertTrue(any(route.startswith("POST /transactions") for route in data["routes"]))
         self.assertEqual(headers["access-control-allow-origin"], "*")
         self.mine(2)
@@ -276,6 +278,27 @@ class HttpEdgeCaseTests(ApiFixture):
         self.assertTrue(raw.startswith(b"HTTP/1.1 400"))
         # Le nœud continue de répondre normalement après ces requêtes.
         self.assertEqual((await self.get("/status"))[0], 200)
+
+
+class ExplorerTests(ApiFixture):
+    async def test_root_serves_html_to_browsers_and_json_to_api_clients(self):
+        # Un navigateur (Accept: text/html) reçoit l'explorateur de blocs.
+        status, headers, body = await http(self.api, "GET", "/", headers={"Accept": "text/html"})
+        self.assertEqual(status, 200)
+        self.assertTrue(headers["content-type"].startswith("text/html"))
+        self.assertIn(b"FLOUS", body)
+        self.assertIn(b"<canvas", body)
+        # Sans Accept HTML, la racine reste l'index JSON (clients API, curl, tests).
+        status, headers, data = await self.get("/")
+        self.assertEqual(status, 200)
+        self.assertEqual(data["name"], "FLOUS")
+
+    async def test_explorer_route_always_html(self):
+        status, headers, body = await http(self.api, "GET", "/explorer")
+        self.assertEqual(status, 200)
+        self.assertTrue(headers["content-type"].startswith("text/html"))
+        self.assertIn(b"FLS", body)
+        self.assertEqual((await self.post("/explorer", {}))[0], 405)
 
 
 if __name__ == "__main__":

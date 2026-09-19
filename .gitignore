@@ -6,3 +6,8 @@ data/
 # Wallets : un fichier de clés (même chiffrées) ne se commite jamais.
 wallet.json
 *.wallet.json
+
+# PyInstaller (exécutable clic-and-run) : on ne commite pas les binaires
+build/
+dist/
+*.egg-info/

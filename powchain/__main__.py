@@ -280,7 +280,7 @@ async def run_status(args: argparse.Namespace) -> None:
 
 
 def fee_argument(text: str | None) -> int:
-    """Frais en COIN (écriture décimale) -> unités ; omis = minimum relayé par les nœuds."""
+    """Frais en FLS (écriture décimale) -> unités ; omis = minimum relayé par les nœuds."""
     return MIN_RELAY_FEE if text is None else parse_coin_amount(text)
 
 
@@ -484,7 +484,7 @@ def mine_address_argument(value: str) -> str:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="python -m powchain", description="powchain : nœud, clés, paiements.")
+    parser = argparse.ArgumentParser(prog="python -m powchain", description="FLOUS (FLS) — nœud, clés, paiements (moteur powchain).")
     commands = parser.add_subparsers(dest="command", required=True)
 
     node = commands.add_parser("node", help="lancer un nœud (et miner si --mine / --mine-label)")
@@ -506,7 +506,7 @@ def build_parser() -> argparse.ArgumentParser:
                       help="wallet où lire --mine-label (défaut : wallet.json)")
     node.add_argument("--data-dir", default=None, metavar="DOSSIER", help="dossier de données (défaut : data/node-<port>)")
     node.add_argument("--memory", action="store_true", help="ne rien enregistrer sur le disque")
-    node.add_argument("--min-fee", default=None, metavar="COIN",
+    node.add_argument("--min-fee", default=None, metavar="FLS",
                       help=f"frais minimal pour garder et relayer une transaction (défaut : {format_units(MIN_RELAY_FEE)})")
     node.add_argument("--api-port", type=int, default=None, metavar="PORT",
                       help=f"port de l'API HTTP (défaut : port P2P + {API_PORT_OFFSET}) ; même interface que le nœud (--public l'ouvre aussi)")
@@ -522,8 +522,8 @@ def build_parser() -> argparse.ArgumentParser:
     send.add_argument("--node", default="127.0.0.1:5000")
     send.add_argument("--seed-hex", required=True, help="graine privée de l'expéditeur (64 hex)")
     send.add_argument("--to", type=address_argument, required=True)
-    send.add_argument("--amount", required=True, help="montant en COIN, ex. 1.5")
-    send.add_argument("--fee", default=None, help=f"frais pour le mineur en COIN (défaut : {format_units(MIN_RELAY_FEE)})")
+    send.add_argument("--amount", required=True, help="montant en FLS, ex. 1.5")
+    send.add_argument("--fee", default=None, help=f"frais pour le mineur en FLS (défaut : {format_units(MIN_RELAY_FEE)})")
     send.add_argument("--data", default="")
     send.add_argument("--sequence", type=int, default=None, help="sinon demandée au nœud")
 
@@ -562,8 +562,8 @@ def _build_wallet_parser(commands: "argparse._SubParsersAction") -> None:
     wsend.add_argument("--node", default="127.0.0.1:5000")
     wsend.add_argument("--from", dest="from_label", required=True, metavar="NOM", help="clé expéditrice (label du wallet)")
     wsend.add_argument("--to", required=True, metavar="ADRESSE", help="adresse destinataire (forme à somme de contrôle)")
-    wsend.add_argument("--amount", required=True, help="montant en COIN, ex. 1.5")
-    wsend.add_argument("--fee", default=None, help=f"frais pour le mineur en COIN (défaut : {format_units(MIN_RELAY_FEE)})")
+    wsend.add_argument("--amount", required=True, help="montant en FLS, ex. 1.5")
+    wsend.add_argument("--fee", default=None, help=f"frais pour le mineur en FLS (défaut : {format_units(MIN_RELAY_FEE)})")
     wsend.add_argument("--data", default="")
     wsend.add_argument("--sequence", type=int, default=None, help="sinon demandée au nœud")
     wsend.add_argument("--unchecked", action="store_true", help="accepter une adresse --to sans somme de contrôle vérifiée")

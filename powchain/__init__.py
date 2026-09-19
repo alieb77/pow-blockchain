@@ -26,7 +26,13 @@ reversé au mineur par la coinbase ; mempool servi par frais décroissant,
 minimum relayé MIN_RELAY_FEE et éviction des moins payantes : anti-spam).
 Partie 12 : API HTTP (ApiServer : serveur HTTP/1.1 minimal sur asyncio, JSON,
 CORS ; lecture de la chaîne, des comptes, du mempool et des pairs ; soumission
-de transactions signées ; index transaction/adresse dans Blockchain).
+de transactions signées ; index transaction/adresse dans Blockchain ; sert
+aussi l'explorateur de blocs web à la racine pour un navigateur).
+Partie 13 : limite de débit par pair (seau à jetons par connexion, MESSAGE_RATE
+jetons/s plafonnés à MESSAGE_BURST ; un flot de messages même valides vaut une
+déconnexion et un ban, comme une ligne illisible ; anti-spam avant l'ouverture
+à un large public). Marque : monnaie FLOUS, ticker FLS (COIN_NAME / COIN_SYMBOL,
+affichage) ; le format canonique hashé garde le préfixe interne « powchain/… ».
 
 Ce module ré-exporte l'API publique pour permettre d'écrire simplement :
 
@@ -95,6 +101,8 @@ from .node import (
     MAX_FUTURE_DRIFT_SECONDS,
     MAX_INBOUND,
     MAX_PEERS,
+    MESSAGE_BURST,
+    MESSAGE_RATE,
     RECONNECT_BASE_DELAY,
     RECONNECT_MAX_DELAY,
     AddressForgotten,
@@ -109,6 +117,7 @@ from .node import (
     TransactionAdded,
 )
 from .money import (
+    COIN_NAME,
     COIN_SYMBOL,
     HALVING_INTERVAL,
     INITIAL_BLOCK_REWARD,
@@ -165,12 +174,13 @@ from .transaction import (
 )
 from .wallet import DEFAULT_WALLET_PATH, Wallet, WalletEntry
 
-__version__ = "0.12.0"
+__version__ = "0.13.0"
 
 __all__ = [
     "ADDRESS_LENGTH",
     "ADJUSTMENT_DIVISOR",
     "COINBASE_ADDRESS",
+    "COIN_NAME",
     "COIN_SYMBOL",
     "DEFAULT_WALLET_PATH",
     "Wallet",
@@ -202,6 +212,8 @@ __all__ = [
     "MAX_FUTURE_DRIFT_SECONDS",
     "MAX_INBOUND",
     "MAX_PEERS",
+    "MESSAGE_BURST",
+    "MESSAGE_RATE",
     "PRIVATE",
     "PUBLIC",
     "RECONNECT_BASE_DELAY",

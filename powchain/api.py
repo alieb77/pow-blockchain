@@ -46,6 +46,7 @@ import asyncio
 import json
 from collections.abc import Callable
 from dataclasses import dataclass
+from importlib import resources
 from urllib.parse import parse_qs, unquote, urlsplit
 
 from .address import normalize_address, to_checksummed_address
@@ -53,7 +54,7 @@ from .block import Block
 from .codec import block_to_dict, transaction_from_dict, transaction_to_dict
 from .crypto import is_valid_hash_hex
 from .errors import CodecError, InvalidTransactionError, MempoolError
-from .money import COIN_SYMBOL, UNITS_PER_COIN
+from .money import COIN_NAME, COIN_SYMBOL, UNITS_PER_COIN
 from .network import ALL_INTERFACES, NodeServer, local_ip_addresses
 from .protocol import PROTOCOL_VERSION, format_address
 from .transaction import Transaction
@@ -79,6 +80,8 @@ STATUS_TEXT = {
 }
 
 ROUTES = (
+    "GET /                explorateur de blocs (navigateur) ou index JSON (client API)",
+    "GET /explorer        explorateur de blocs (page web façon Tetris)",
     "GET /status",
     "GET /blocks?limit=20&before=<hauteur>",
     "GET /blocks/<index|hash>",
@@ -89,6 +92,44 @@ ROUTES = (
     "GET /mempool",
     "GET /peers",
 )
+
+
+_EXPLORER_CACHE: str | None = None
+
+
+def load_explorer_html() -> str:
+    """Le HTML de l'explorateur de blocs (powchain/web/explorer.html), chargé une fois puis mis en cache.
+
+    Empaqueté avec le module (importlib.resources) : fonctionne aussi bien
+    depuis les sources que depuis un exécutable PyInstaller (le .spec ajoute ce
+    fichier aux données). Un fichier manquant renvoie une page minimale plutôt
+    que de faire échouer le nœud.
+    """
+    global _EXPLORER_CACHE
+    if _EXPLORER_CACHE is not None:
+        return _EXPLORER_CACHE
+    # 1) Depuis les sources ou un paquet installé (importlib.resources).
+    try:
+        _EXPLORER_CACHE = resources.files("powchain.web").joinpath("explorer.html").read_text(encoding="utf-8")
+        return _EXPLORER_CACHE
+    except (FileNotFoundError, ModuleNotFoundError, OSError, TypeError):
+        pass
+    # 2) Repli pour un exécutable PyInstaller (données extraites dans sys._MEIPASS).
+    import os
+    import sys
+
+    for base in (getattr(sys, "_MEIPASS", None), os.path.dirname(os.path.dirname(__file__))):
+        if not base:
+            continue
+        candidate = os.path.join(base, "powchain", "web", "explorer.html")
+        try:
+            with open(candidate, encoding="utf-8") as handle:
+                _EXPLORER_CACHE = handle.read()
+                return _EXPLORER_CACHE
+        except OSError:
+            continue
+    _EXPLORER_CACHE = "<!doctype html><meta charset=utf-8><title>FLOUS</title><p>Explorateur indisponible ; API JSON sur /status."
+    return _EXPLORER_CACHE
 
 
 class ApiError(Exception):
@@ -106,6 +147,7 @@ class Request:
     path: str
     query: dict[str, list[str]]
     body: bytes
+    accept: str = ""  # en-tête Accept : sert à servir le HTML aux navigateurs et le JSON aux clients API
 
 
 @dataclass(slots=True)
@@ -214,8 +256,15 @@ class ApiServer:
         segments = [unquote(part) for part in request.path.split("/") if part]
         reading = request.method in ("GET", "HEAD")
         if not segments:
+            # Racine : un navigateur (Accept: text/html) reçoit l'explorateur ; un client API le JSON.
+            if reading and "text/html" in request.accept:
+                return self._explorer()
             return self._get_only(reading, self._index)
         head, rest = segments[0], segments[1:]
+        if head == "explorer" and not rest:
+            if not reading:
+                raise ApiError(405, "cette route se lit (GET)")
+            return self._explorer()
         if head == "status" and not rest:
             return self._get_only(reading, self._status)
         if head == "blocks" and not rest:
@@ -246,8 +295,18 @@ class ApiServer:
 
     # ---------------------------------------------------------------- routes
 
+    def _explorer(self) -> Response:
+        return Response(200, load_explorer_html(), content_type="text/html; charset=utf-8")
+
     def _index(self) -> dict:
-        return {"name": "powchain", "api_version": API_VERSION, "routes": list(ROUTES)}
+        return {
+            "name": COIN_NAME,
+            "engine": "powchain",
+            "coin_name": COIN_NAME,
+            "coin_symbol": COIN_SYMBOL,
+            "api_version": API_VERSION,
+            "routes": list(ROUTES),
+        }
 
     def _status(self) -> dict:
         node = self.node
@@ -274,6 +333,8 @@ class ApiServer:
             "accounts": len(node.chain.state.accounts),
             "units_per_coin": UNITS_PER_COIN,
             "coin_symbol": COIN_SYMBOL,
+            "coin_name": COIN_NAME,
+            "rate_limited": node.stats.get("rate_limited", 0),
             "listen": self.server.address,
             "time": int(node.now()),
         }
@@ -524,7 +585,7 @@ async def _read_request(reader: asyncio.StreamReader) -> Request:
     elif headers.get("transfer-encoding"):
         raise ApiError(400, "Transfer-Encoding non pris en charge : envoyez Content-Length")
     split = urlsplit(target)
-    return Request(method.upper(), split.path or "/", parse_qs(split.query), body)
+    return Request(method.upper(), split.path or "/", parse_qs(split.query), body, accept=headers.get("accept", ""))
 
 
 async def _write_response(writer: asyncio.StreamWriter, response: Response, *, head_only: bool = False) -> None:

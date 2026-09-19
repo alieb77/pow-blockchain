@@ -1,0 +1,58 @@
+name: Build executable
+
+# Construit l'exécutable « clic-and-run » FLOUS.
+#   * à chaque tag « v* » (ex. v0.13.0) : l'exécutable est aussi attaché à la Release ;
+#   * à la demande (workflow_dispatch) : l'exécutable est disponible en artefact.
+# Ainsi un non-développeur télécharge FLOUS.exe depuis la page Releases et le lance.
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write  # nécessaire pour attacher l'exécutable à la Release
+
+jobs:
+  windows:
+    name: FLOUS.exe (Windows)
+    runs-on: windows-latest
+    steps:
+      - name: Récupérer le code
+        uses: actions/checkout@v4
+
+      - name: Installer Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Installer les dépendances et PyInstaller
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt pyinstaller
+
+      - name: Construire l'exécutable
+        run: python build_exe.py
+
+      - name: Vérifier que l'exécutable démarre
+        run: |
+          Start-Process -FilePath dist/FLOUS.exe -ArgumentList '--memory','--no-default-peers','--no-api' -PassThru | ForEach-Object {
+            Start-Sleep -Seconds 6
+            if ($_.HasExited) { throw "FLOUS.exe s'est arrêté prématurément (code $($_.ExitCode))" }
+            Stop-Process -Id $_.Id -Force
+          }
+          Write-Host "FLOUS.exe démarre correctement."
+        shell: pwsh
+
+      - name: Publier l'artefact
+        uses: actions/upload-artifact@v4
+        with:
+          name: FLOUS-windows
+          path: dist/FLOUS.exe
+
+      - name: Attacher à la Release (sur un tag)
+        if: startsWith(github.ref, 'refs/tags/')
+        run: gh release upload "${{ github.ref_name }}" dist/FLOUS.exe --clobber
+        env:
+          GH_TOKEN: ${{ github.token }}

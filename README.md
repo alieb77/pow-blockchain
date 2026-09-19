@@ -1,8 +1,20 @@
-# powchain — Parties 1 à 11 : hashes, preuve de travail, signatures, soldes, mempool, réseau P2P, disque, wallet, minage vers wallet, ouverture au réseau, résilience, frais
+# FLOUS (FLS) — blockchain Proof of Work · moteur `powchain`
 
 [![CI](https://github.com/alieb77/pow-blockchain/actions/workflows/ci.yml/badge.svg)](https://github.com/alieb77/pow-blockchain/actions/workflows/ci.yml)
 
-Blockchain Proof of Work construite pas à pas en Python (3.10 ou plus récent).
+**FLOUS** est une monnaie Proof of Work (ticker **FLS**) portée par `powchain`,
+un moteur de blockchain construit pas à pas en Python (3.10 ou plus récent) :
+hashes, preuve de travail, signatures Ed25519, soldes, mempool, réseau P2P,
+disque, wallet, ouverture au réseau, résilience, frais, API HTTP, **limite de
+débit par pair**, **explorateur de blocs** et **exécutable clic-and-run**.
+
+> **Nom** FLOUS · **ticker** FLS · **unité** 1 FLS = 100 000 000 unités ·
+> **émission** 50 FLS par bloc, divisée par deux tous les 210 000 blocs,
+> plafond 21 000 000 FLS. Le ticker est purement d'affichage ; le format
+> canonique réellement hashé garde le préfixe interne `powchain/…` (le moteur),
+> ce qui garde une seule et même chaîne, compatible avec le réseau déjà en
+> ligne.
+
 Une seule dépendance externe, `cryptography`, pour les signatures Ed25519 **et**
 le chiffrement du wallet (scrypt + AES-256-GCM). Le réseau et le stockage
 n'utilisent que la bibliothèque standard (`asyncio`, `json`, `ipaddress`).
@@ -26,8 +38,13 @@ n'utilisent que la bibliothèque standard (`asyncio`, `json`, `ipaddress`).
 > fautif. Depuis la Partie 11, chaque paiement porte un **frais** signé,
 > débité avec le montant et reversé au mineur par la coinbase ; le mempool
 > sert les meilleurs payeurs d'abord, refuse ce qui paie moins que le minimum
-> relayé et, s'il est plein, évince le moins payant : le spam a un coût. Les
-> packs de jeu viendront ensuite.
+> relayé et, s'il est plein, évince le moins payant : le spam a un coût. Depuis
+> la Partie 12, chaque nœud sert une **API HTTP JSON** et un **explorateur de
+> blocs** web (façon Tetris) à sa propre adresse. Depuis la Partie 13, un nœud
+> **limite le débit de chaque pair** (seau à jetons) : un flot de messages,
+> même valides, vaut une déconnexion et un ban, avant l'ouverture à un large
+> public. Un **exécutable clic-and-run** (`FLOUS.exe`) permet enfin à un
+> non-développeur de participer sans rien installer.
 
 ## Installer et lancer
 
@@ -41,11 +58,54 @@ Démonstration complète (Parties 1 à 12 : réseau simulé, vraies sockets, dis
 python main.py
 ```
 
-Tests (476, environ 15 s ; une trentaine utilisent de vraies sockets locales) :
+Tests (492, environ 17 s ; une trentaine utilisent de vraies sockets locales) :
 
 ```bash
 python -m unittest -v
 ```
+
+## Participer en un clic (exécutable)
+
+Pour un non-développeur, **`FLOUS.exe`** rejoint le réseau et ouvre
+l'explorateur, sans rien installer :
+
+1. Télécharger `FLOUS.exe` depuis la page **Releases** du dépôt.
+2. Double-cliquer. Le nœud rejoint le réseau FLOUS et l'explorateur de blocs
+   s'ouvre sur `http://127.0.0.1:8000/`.
+3. Fermer la fenêtre pour arrêter le nœud.
+
+Par défaut le nœud n'ouvre que des connexions **sortantes** (aucune demande de
+pare-feu). Pour devenir un nœud public accessible de l'extérieur, le lancer avec
+`--public` (voir « Ouvrir au réseau »). Toutes les options de
+`python -m powchain node` sont acceptées (`--mine`, `--mine-label`, `--port`…).
+`FLOUS_NO_BROWSER=1` empêche l'ouverture du navigateur (serveurs).
+
+Construire l'exécutable soi-même (produit `dist/FLOUS.exe`) :
+
+```bash
+pip install pyinstaller
+python build_exe.py
+```
+
+Le workflow [`build-exe.yml`](.github/workflows/build-exe.yml) le construit sur
+GitHub, l'attache à chaque Release (`v*`) et le teste au démarrage.
+
+## Explorateur de blocs
+
+Chaque nœud sert un **explorateur de blocs** web (façon Tetris : polices arcade
+`Press Start 2P` / `VT323`, palette des 7 pièces, blocs en relief 3D, scanlines
+CRT, sons 8-bit WebAudio) à sa propre adresse HTTP :
+
+* servi par le nœud sur **`http://127.0.0.1:8000/`** (un navigateur y voit
+  l'explorateur ; un client API y lit l'index JSON) et sur `…/explorer` ;
+* la source est [`powchain/web/explorer.html`](powchain/web/explorer.html), un
+  seul fichier, déployable tel quel (Vercel, Netlify…) ou ouvert en local.
+
+Il affiche en direct la masse monétaire (SCORE), la hauteur (LINES) et la
+difficulté (LEVEL) en HUD arcade, la pile des blocs récents (couleur dérivée du
+hash), le détail d'un bloc et de ses transactions, la recherche par adresse /
+hash / n° de bloc, le mempool et les pairs. Servi par le nœud, il interroge
+**la même origine** : ni CORS ni contenu mixte à gérer.
 
 ### Faire tourner des nœuds dans plusieurs terminaux
 
@@ -94,8 +154,8 @@ avec `--peers 127.0.0.1:5001` découvrira le premier tout seul.
 > `keygen` et `send --seed-hex` existent encore (dépannage) mais exposent la
 > graine privée : préférez le wallet.
 
-Chaque nœud sert aussi une **API HTTP** (Partie 12) sur le port P2P + 1000,
-en JSON : ouvrez <http://127.0.0.1:6000/status>, `/blocks`, `/blocks/1`,
+Chaque nœud sert aussi une **API HTTP** (Partie 12) sur le port P2P + 3000
+(5000 → 8000) en JSON : ouvrez <http://127.0.0.1:8000/status>, `/blocks`, `/blocks/1`,
 `/accounts/<adresse>`, `/mempool`, `/peers` dans un navigateur ou avec `curl` ;
 `POST /transactions` accepte une transaction déjà signée. `--api-port` la
 déplace, `--no-api` la coupe, `--public` l'ouvre avec le nœud.
@@ -160,11 +220,15 @@ chaîne isolée. `--peers` ajoute d'autres adresses à ces amorces ;
 ```
 pow-blockchain/
 ├── main.py                  démonstration : clés, coinbase, mempool, attaques, émission, réseau P2P, disque, wallet, ouverture au réseau, résilience, frais
+├── launcher.py              lanceur clic-and-run : démarre un nœud FLOUS et ouvre l'explorateur
+├── flous.spec               recette PyInstaller de l'exécutable (dist/FLOUS.exe)
+├── build_exe.py             construit l'exécutable en une commande
 ├── requirements.txt         cryptography>=42
 ├── powchain/
 │   ├── errors.py            hiérarchie d'exceptions
 │   ├── crypto.py            SHA-256 (hashlib) et format des hashes
-│   ├── money.py             montants entiers (1 COIN = 10^8 unités), récompense et émission, frais minimal relayé
+│   ├── money.py             montants entiers (1 FLS = 10^8 unités), nom/ticker FLOUS/FLS, récompense et émission, frais minimal relayé
+│   ├── web/explorer.html    explorateur de blocs (page web unique façon Tetris) servi par l'API
 │   ├── keys.py              Ed25519 + chiffrement (scrypt, AES-256-GCM) : SEUL module qui importe cryptography
 │   ├── address.py           adresse = clé publique en hexadécimal ; somme de contrôle d'affichage (EIP-55)
 │   ├── serialization.py     format canonique (le SEUL endroit qui définit les octets hashés)
@@ -179,12 +243,13 @@ pow-blockchain/
 │   ├── protocol.py          catalogue des messages, enveloppe JSON, une ligne par message ; portée des adresses
 │   ├── node.py              Node : logique P2P PURE (gossip, synchronisation, forks, règle N1, portées, plafond d'entrées, tick : rappels et bans)
 │   ├── network.py           NodeServer : sockets TCP asyncio + minage par tranches ; délai de hello, appels avec délai, tick chaque seconde
-│   ├── api.py               ApiServer : API HTTP JSON (serveur HTTP/1.1 minimal sur asyncio, CORS) : chaîne, comptes, mempool, pairs, POST transaction
+│   ├── api.py               ApiServer : API HTTP JSON (serveur HTTP/1.1 minimal sur asyncio, CORS) : chaîne, comptes, mempool, pairs, POST transaction ; sert aussi l'explorateur
 │   ├── simulation.py        SimulatedNetwork / FakeClock : plusieurs nœuds en mémoire (hôte « sim-<id> » chacun), déterministe
 │   ├── storage.py           NodeStorage : dossier de données (blocks.jsonl, mempool.jsonl, peers.json)
 │   ├── wallet.py            Wallet : clés chiffrées dans wallet.json (compose keys.py, n'importe pas cryptography)
 │   └── __main__.py          ligne de commande : node (--public, --mine-label, --min-fee, --api-port, --no-api), wallet, status ; keygen/send en legacy
-└── tests/                   476 tests unittest ; helpers.py = clés de test déterministes
+├── tests/                   492 tests unittest ; helpers.py = clés de test déterministes
+└── .github/workflows/       ci.yml (tests Python 3.10-3.14) et build-exe.yml (FLOUS.exe)
 ```
 
 Chaque module ne dépend que de ceux situés au-dessus de lui dans cette liste.
@@ -200,14 +265,14 @@ qui permet de tester forks, réorganisations et persistance de façon détermini
 | Sujet | Convention |
 |---|---|
 | Hash | SHA-256, représenté **partout** en hexadécimal minuscule de 64 caractères |
-| Montant | entier en **unités** ; `1 COIN = 100_000_000 unités` ; `0 <= amount <= MAX_MONEY` (21 M COIN) ; jamais de float |
+| Montant | entier en **unités** ; `1 FLS = 100_000_000 unités` ; `0 <= amount <= MAX_MONEY` (21 M FLS) ; jamais de float |
 | Clé privée | 32 octets Ed25519 ; ne quitte jamais `KeyPair`, `repr()` ne l'affiche pas |
 | Adresse | la clé publique Ed25519 en hexadécimal minuscule (64 caractères) |
 | Signature | Ed25519 des 32 octets du hash de la transaction, hexadécimal (128 caractères) |
 | `sequence` | numéro de séquence du compte expéditeur : la n-ième transaction émise porte `n-1` ; anti-rejeu |
 | Coinbase | transaction dont `sender` est l'adresse réservée `"0"*64`, non signée, `fee = 0`, `sequence` = hauteur du bloc, `amount` = `block_reward(hauteur)` + somme des frais du bloc |
-| Récompense | 50 COIN, divisée par deux tous les 210 000 blocs ; total < 21 M COIN ; les frais ne créent rien, ils changent de main |
-| `fee` | frais en unités, signé avec le reste, débité de l'expéditeur **en plus** de `amount`, reversé au mineur par la coinbase ; la chaîne accepte `fee >= 0`, le mempool exige `fee >= MIN_RELAY_FEE` (0.0001 COIN, `node --min-fee`) |
+| Récompense | 50 FLS, divisée par deux tous les 210 000 blocs ; total < 21 M FLS ; les frais ne créent rien, ils changent de main |
+| `fee` | frais en unités, signé avec le reste, débité de l'expéditeur **en plus** de `amount`, reversé au mineur par la coinbase ; la chaîne accepte `fee >= 0`, le mempool exige `fee >= MIN_RELAY_FEE` (0.0001 FLS, `node --min-fee`) |
 | `data` | chaîne UTF-8 opaque de 1024 octets max ; réservée aux futures métadonnées de packs |
 | Timestamp | entier, secondes Unix UTC ; strictement croissant d'un bloc au suivant ; au plus 120 s dans le futur pour être relayé (règle N1) |
 | Difficulté | entier `>= 1` stocké dans l'en-tête et hashé ; cible `= (2^256 - 1) // difficulté` |
@@ -216,7 +281,7 @@ qui permet de tester forks, réorganisations et persistance de façon détermini
 | Adresse réseau | `hôte:port` ; un nœud écoute sur `--port` (`127.0.0.1` par défaut, toutes les interfaces avec `--public`), un client éphémère annonce `listen_port: null` |
 | Portée d'un hôte | `loopback` (127.x, `localhost`, `::1`, `0.0.0.0`) < `private` (toute adresse non routable sur Internet : 10/8, 172.16/12, 192.168/16, lien local…) < `public` (le reste, et les noms d'hôte) ; une adresse n'est annoncée qu'à un pair au moins aussi proche que sa portée |
 | Dossier de données | `data/node-<port>/` : `blocks.jsonl` (un bloc par ligne, Genesis compris), `mempool.jsonl`, `peers.json` (`{"version": 1, "addresses": [...]}`) |
-| API HTTP | `http://<hôte>:<port P2P + 1000>/` (`--api-port`, `--no-api`), même interface que le nœud (`--public` l'ouvre) ; JSON, montants en unités, `Access-Control-Allow-Origin: *`, une requête par connexion |
+| API HTTP | `http://<hôte>:<port P2P + 3000>/` (5000 → 8000) (`--api-port`, `--no-api`), même interface que le nœud (`--public` l'ouvre) ; JSON, montants en unités, `Access-Control-Allow-Origin: *`, une requête par connexion |
 
 ## Format canonique (ce qui est réellement hashé)
 
@@ -256,7 +321,7 @@ block = mine_block(create_block(chain.last_block, pool.select(chain.state), mine
 chain.add_block(block)
 pool.remove_confirmed(block, chain.state)
 
-chain.state.balance_of(alice.address)      # 1_000_000_000 unités = 10 COIN
+chain.state.balance_of(alice.address)      # 1_000_000_000 unités = 10 FLS
 ```
 
 ## Le réseau pair-à-pair (Partie 5)
@@ -550,7 +615,7 @@ Deux niveaux, volontairement distincts :
   reste libre d'inclure une transaction gratuite dans **son** bloc : il en paie
   le coût en preuve de travail, et cela ne coûte rien aux autres (démo 13a).
 - **Politique de relais** (`Mempool`, règle M5) : un nœud n'attend ni ne relaie
-  une transaction qui paie moins que `MIN_RELAY_FEE` (0.0001 COIN ; réglable
+  une transaction qui paie moins que `MIN_RELAY_FEE` (0.0001 FLS ; réglable
   par `node --min-fee`). C'est ce qui protège le réseau : inonder les mempools
   de milliers de transactions coûte des coins à l'attaquant, et un mempool
   **plein** n'accepte une nouvelle transaction que si elle paie plus que la
@@ -572,22 +637,24 @@ Parties 1 à 10 incompatibles : on repart du Genesis.
 Limites honnêtes : le seuil est fixe (pas d'estimation de frais selon la
 charge, pas de marché des frais) ; un mineur peut toujours remplir ses propres
 blocs de transactions gratuites ; les frais n'empêchent pas un pair de nous
-envoyer des messages invalides en boucle (une limite de débit par pair viendra
-avec l'ouverture publique) ; et la priorité aux frais est locale à chaque
-mempool : deux nœuds honnêtes peuvent servir dans un ordre différent.
+envoyer des messages invalides en boucle (c'est désormais la **limite de débit
+par pair**, Partie 13, qui s'en charge) ; et la priorité aux frais est locale à
+chaque mempool : deux nœuds honnêtes peuvent servir dans un ordre différent.
 
 ## API HTTP (Partie 12)
 
 Le protocole pair-à-pair est fait pour des nœuds qui se parlent en continu ;
 un navigateur, un script ou une application veut juste **poser une question et
 lire la réponse**. Chaque nœud sert donc une API HTTP en JSON (`api.py`), sur
-le port P2P + 1000 par défaut, sans aucune dépendance : un serveur HTTP/1.1
+le port P2P + 3000 par défaut (5000 → 8000, évite les ports bloqués par les navigateurs), sans aucune dépendance : un serveur HTTP/1.1
 minimal écrit sur les flux asyncio, dans la même boucle que le nœud (pas de
 fil supplémentaire, donc pas de verrou à ajouter au `Node`).
 
 | Route | Réponse |
 |---|---|
-| `GET /status` | hauteur, travail, pointe, difficulté, pairs (entrants/sortants), carnet, bans, mempool et `min_fee`, mineur, blocs minés ici, masse monétaire, `units_per_coin` |
+| `GET /` | un **navigateur** (`Accept: text/html`) reçoit l'explorateur de blocs ; un **client API** reçoit l'index JSON (`name`, `engine`, `coin_symbol`, routes) |
+| `GET /explorer` | l'explorateur de blocs (page HTML), toujours |
+| `GET /status` | hauteur, travail, pointe, difficulté, pairs (entrants/sortants), carnet, bans, mempool et `min_fee`, mineur, blocs minés ici, masse monétaire, `units_per_coin`, `coin_name`, `coin_symbol`, `rate_limited` (messages écartés par la limite de débit) |
 | `GET /blocks?limit=20&before=H` | résumés (index, hash, horodatage, difficulté, nb de transactions, frais, mineur, récompense) du plus récent au plus ancien ; `next_before` pour la page suivante |
 | `GET /blocks/<index ou hash>` | le bloc complet, transactions comprises, plus `confirmations`, `fees`, `miner` |
 | `GET /transactions/<hash>` | la transaction avec `status` (`confirmed` : bloc, horodatage, confirmations ; `pending` : dans le mempool) |
@@ -610,9 +677,34 @@ page web servie d'ailleurs d'interroger un nœud ; sans cookie ni session, une
 page tierce n'a rien à voler.
 
 Limites : pas de HTTPS ni d'authentification (données publiques ; pour
-Internet, un proxy devant ou `--no-api`), pas de limite de débit par client,
-un bug dans une route renvoie `500` et un journal, jamais un nœud arrêté
-(section 14 de `main.py`, `tests/test_api.py`).
+Internet, un proxy devant ou `--no-api`), pas de limite de débit par client
+HTTP (la limite de la Partie 13 porte sur les **pairs** P2P), un bug dans une
+route renvoie `500` et un journal, jamais un nœud arrêté (section 14 de
+`main.py`, `tests/test_api.py`).
+
+## Limite de débit par pair (Partie 13)
+
+Avant d'exposer un nœud à un large public, il faut se protéger d'un pair qui
+**inonde de messages**. Le bannissement (Partie 10) punit déjà les messages
+*invalides* ; il ne freine pas un pair qui envoie des messages **valides** en
+boucle (transactions redondantes, `get_account`, `get_blocks`…), qui coûtent
+tout de même du CPU et de la bande passante à tout le monde.
+
+Chaque connexion a donc un **seau à jetons** (`powchain/node.py`) :
+
+- le seau contient au plus `MESSAGE_BURST` jetons (128 par défaut) ;
+- il se remplit de `MESSAGE_RATE` jetons par seconde (32 par défaut) ;
+- chaque message reçu consomme un jeton ;
+- seau vide = faute : le pair est **déconnecté et son hôte banni**
+  `BAN_SECONDS`, exactement comme une ligne illisible (jamais la boucle locale,
+  ce sont nos propres processus).
+
+Une rafale légitime (poignée de main, découverte, rattrapage paginé) puise dans
+un seau plein et passe sans encombre ; un flot soutenu au-delà de la cadence le
+vide et se fait couper. Les seuils sont réglables par nœud
+(`Node(message_rate=…, message_burst=…)`) ; `message_rate=0` désactive la
+limite. Le compteur `stats["rate_limited"]` (exposé par `GET /status`) compte
+les messages écartés (`tests/test_rate_limit.py`).
 
 ## Règles de validation
 
@@ -699,14 +791,26 @@ fichier tronquée réparée ; corruption ailleurs refusée ; écritures atomique
   avec historique, mempool, pairs) et accepte des transactions signées ; index
   transaction/adresse dans la chaîne ; CORS ouvert ; serveur HTTP minimal sans
   dépendance (section 14 de `main.py`, `tests/test_api.py`).
+- Limite de débit par pair : seau à jetons par connexion ; un flot de messages,
+  même valides, vaut déconnexion + ban (jamais la boucle locale) ; seuils
+  réglables ; compteur `rate_limited` exposé (`tests/test_rate_limit.py`).
+- Explorateur de blocs : page web unique façon Tetris servie par chaque nœud
+  (`/` pour un navigateur, `/explorer` toujours) ; HUD arcade, pile des blocs,
+  détail, recherche, mempool, pairs, sons 8-bit (`powchain/web/explorer.html`).
+- Exécutable clic-and-run : `FLOUS.exe` (PyInstaller) démarre un nœud et ouvre
+  l'explorateur, sans rien installer (`launcher.py`, `flous.spec`, workflow
+  `build-exe.yml`).
+- Marque : monnaie **FLOUS**, ticker **FLS** (affichage) ; le format canonique
+  hashé garde le préfixe interne `powchain/…` : une seule chaîne, compatible
+  avec le réseau déjà en ligne.
 
 ## Ce qui n'est pas encore implémenté, et pourquoi plus tard
 
 | Fonctionnalité | Pourquoi elle attend |
 |---|---|
 | Instantané de l'état | Le chargement rejoue toute la chaîne (O(n)). Un instantané périodique des soldes rendrait le démarrage immédiat, au prix d'un second format à garder cohérent avec les blocs. |
-| HTTPS et authentification de l'API | L'API est en clair et sans compte : elle ne sert que des données publiques et des transactions déjà signées. Pour l'exposer sur Internet, un proxy HTTPS devant (ou `--no-api`) ; une limite de débit par client viendra avec l'ouverture publique. |
-| Estimation des frais, limite de débit par pair | Le seuil de relais est fixe : pas de marché des frais selon la charge. Et les frais ne freinent pas un pair qui envoie des messages *invalides* en boucle (ils sont rejetés sans coût pour lui) : une limite de débit par connexion viendra avec l'ouverture publique. |
+| HTTPS et authentification de l'API | L'API est en clair et sans compte : elle ne sert que des données publiques et des transactions déjà signées. Pour l'exposer sur Internet, un proxy HTTPS devant (ou `--no-api`). La limite de débit vise pour l'instant les **pairs** P2P, pas les clients HTTP. |
+| Estimation des frais | Le seuil de relais est fixe : pas de marché des frais selon la charge. La limite de débit par pair (Partie 13) est en place, mais les frais eux-mêmes ne s'ajustent pas encore à la pression sur le mempool. |
 | Bans contournables, éclipse | Le ban est par hôte : un attaquant change d'IP, et des nœuds honnêtes derrière la même box sont bannis avec le fautif. Rappeler ses pairs ne protège pas d'un réseau de complices qui occuperaient toutes nos sorties (attaque par éclipse) : il faudrait diversifier les sources d'adresses et vérifier plusieurs pairs indépendants. |
 | Traversée de NAT | Un nœud derrière une box n'est joignable que si le port est redirigé à la main ; sinon il reste un client sortant. Pas d'UPnP, pas de relais : hors périmètre d'une blockchain pédagogique. |
 | Synchronisation par en-têtes | Un fork profond se cherche par recul géométrique et la branche est revalidée entièrement ; Bitcoin échange d'abord des en-têtes (block locator). Acceptable tant que les chaînes sont courtes. |

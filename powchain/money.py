@@ -3,18 +3,19 @@
 Décision : un montant est un entier Python (précision arbitraire, jamais de
 float) exprimé dans la plus petite unité indivisible de la monnaie.
 
-    1 COIN = 100_000_000 unités        (même convention que 1 BTC = 10^8 satoshis)
+    1 FLS = 100_000_000 unités        (même convention que 1 BTC = 10^8 satoshis)
 
 Pourquoi pas de float ? En flottant, 0.1 + 0.2 != 0.3 : deux machines
 pourraient obtenir des montants différents, donc des hashes différents.
 Avec des entiers, 1 + 2 == 3 partout, toujours.
 
 Bornes : un montant valide vérifie 0 <= amount <= MAX_MONEY. MAX_MONEY vaut
-21 000 000 COIN, soit 2.1e15 unités, ce qui tient largement dans les
+21 000 000 FLS, soit 2.1e15 unités, ce qui tient largement dans les
 8 octets non signés (uint64, max ~1.8e19) de la sérialisation canonique.
 """
 
-COIN_SYMBOL = "COIN"
+COIN_NAME = "FLOUS"  # nom de la monnaie (marque, affichage uniquement)
+COIN_SYMBOL = "FLS"  # ticker (affichage uniquement) ; n'entre JAMAIS dans le format canonique hashé
 COIN_DECIMALS = 8
 UNITS_PER_COIN = 10**COIN_DECIMALS
 MAX_SUPPLY_COINS = 21_000_000
@@ -31,7 +32,7 @@ def _is_ascii_digits(text: str) -> bool:
 
 
 def parse_coin_amount(text: str) -> int:
-    """Convertit une écriture décimale en COIN ("1.5", "0.00000001") en unités.
+    """Convertit une écriture décimale en FLS ("1.5", "0.00000001") en unités.
 
     Le parsing est purement textuel : aucun flottant n'intervient.
     """
@@ -47,7 +48,7 @@ def parse_coin_amount(text: str) -> int:
 
 
 def format_units(units: int) -> str:
-    """Affiche un montant en unités sous la forme '1.50000000 COIN'."""
+    """Affiche un montant en unités sous la forme '1.50000000 FLS'."""
     if not isinstance(units, int) or isinstance(units, bool) or units < 0:
         raise ValueError(f"format_units attend un entier >= 0, reçu {units!r}")
     whole, fraction = divmod(units, UNITS_PER_COIN)
@@ -58,7 +59,7 @@ def format_units(units: int) -> str:
 # transaction coinbase d'un bloc miné, qui vaut block_reward(hauteur). La
 # récompense est divisée par deux tous les HALVING_INTERVAL blocs, comme
 # Bitcoin. Somme de toutes les récompenses :
-#     210 000 * 50 * (1 + 1/2 + 1/4 + ...) < 210 000 * 100 = 21 000 000 COIN
+#     210 000 * 50 * (1 + 1/2 + 1/4 + ...) < 210 000 * 100 = 21 000 000 FLS
 # soit strictement moins que MAX_MONEY : le plafond n'est jamais atteint.
 INITIAL_BLOCK_REWARD = 50 * UNITS_PER_COIN
 HALVING_INTERVAL = 210_000
@@ -75,6 +76,6 @@ def block_reward(height: int) -> int:
 # montant ; ces frais reviennent au mineur du bloc par sa coinbase. La chaîne
 # accepte tout frais >= 0 ; le seuil ci-dessous est une POLITIQUE DE RELAIS
 # (mempool.py, règle M5) : en dessous, un nœud n'attend ni ne relaie la
-# transaction. 0.0001 COIN : négligeable pour un usage normal, dissuasif pour
+# transaction. 0.0001 FLS : négligeable pour un usage normal, dissuasif pour
 # qui voudrait inonder le réseau de milliers de transactions.
 MIN_RELAY_FEE = 10_000
