@@ -1,5 +1,7 @@
 # powchain — Parties 1 à 11 : hashes, preuve de travail, signatures, soldes, mempool, réseau P2P, disque, wallet, minage vers wallet, ouverture au réseau, résilience, frais
 
+[![CI](https://github.com/alieb77/pow-blockchain/actions/workflows/ci.yml/badge.svg)](https://github.com/alieb77/pow-blockchain/actions/workflows/ci.yml)
+
 Blockchain Proof of Work construite pas à pas en Python (3.10 ou plus récent).
 Une seule dépendance externe, `cryptography`, pour les signatures Ed25519 **et**
 le chiffrement du wallet (scrypt + AES-256-GCM). Le réseau et le stockage
