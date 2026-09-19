@@ -4,7 +4,13 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from powchain.__main__ import build_parser, mine_address_argument, resolve_miner_address
+from powchain.__main__ import (
+    DEFAULT_SEEDS,
+    build_parser,
+    mine_address_argument,
+    resolve_miner_address,
+    seed_addresses,
+)
 from powchain.address import to_checksummed_address
 from powchain.keys import KDF_SALT_BYTES, KeyPair
 from powchain.wallet import Wallet
@@ -98,6 +104,33 @@ class NodeParserTests(unittest.TestCase):
         args = parser.parse_args(["node", "--mine-label", "mineur"])
         self.assertEqual(args.mine_label, "mineur")
         self.assertEqual(args.wallet, "wallet.json")
+
+    def test_no_default_peers_flag(self):
+        parser = build_parser()
+        self.assertFalse(parser.parse_args(["node"]).no_default_peers)
+        self.assertTrue(parser.parse_args(["node", "--no-default-peers"]).no_default_peers)
+
+
+class SeedAddressesTests(unittest.TestCase):
+    def test_default_seeds_used_when_no_peers(self):
+        args = argparse.Namespace(peers=[], no_default_peers=False)
+        self.assertEqual(seed_addresses(args), list(DEFAULT_SEEDS))
+
+    def test_peers_come_first_then_default_seeds(self):
+        args = argparse.Namespace(peers=["10.0.0.1:5000"], no_default_peers=False)
+        self.assertEqual(seed_addresses(args), ["10.0.0.1:5000", *DEFAULT_SEEDS])
+
+    def test_no_duplicate_when_peer_is_a_default_seed(self):
+        args = argparse.Namespace(peers=[DEFAULT_SEEDS[0]], no_default_peers=False)
+        self.assertEqual(seed_addresses(args), [DEFAULT_SEEDS[0]])
+
+    def test_no_default_peers_excludes_them(self):
+        args = argparse.Namespace(peers=["10.0.0.1:5000"], no_default_peers=True)
+        self.assertEqual(seed_addresses(args), ["10.0.0.1:5000"])
+
+    def test_no_default_peers_with_empty_peers_is_empty(self):
+        args = argparse.Namespace(peers=[], no_default_peers=True)
+        self.assertEqual(seed_addresses(args), [])
 
 
 if __name__ == "__main__":

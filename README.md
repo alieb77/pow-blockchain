@@ -146,6 +146,15 @@ personne ne peut l'appeler : il participe quand même (il reçoit blocs et
 transactions par les connexions qu'il a ouvertes), mais il n'aide pas les
 nouveaux venus à entrer. Le nœud n'ouvre pas la box lui-même (pas d'UPnP).
 
+### Rejoindre le réseau public (amorces par défaut)
+
+Pour qu'un nouveau venu n'ait rien à configurer, powchain embarque une liste
+d'**amorces par défaut** : des nœuds publics toujours allumés (« bootnodes »).
+Un simple `python -m powchain node` s'y connecte automatiquement et se
+synchronise sur la chaîne partagée — sans elles, chacun minerait sa propre
+chaîne isolée. `--peers` ajoute d'autres adresses à ces amorces ;
+`--no-default-peers` les ignore (réseau privé ou développement local).
+
 ## Arborescence
 
 ```

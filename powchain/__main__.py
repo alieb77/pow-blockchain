@@ -84,6 +84,13 @@ from .wallet import DEFAULT_WALLET_PATH, Wallet
 STATUS_INTERVAL_SECONDS = 10
 WALLET_PASSWORD_ENV = "POWCHAIN_WALLET_PASSWORD"
 
+# Amorces publiques par défaut : nœuds toujours allumés auxquels un nouveau nœud
+# se connecte automatiquement s'il ne reçoit pas de --peers. Sans elles, deux
+# inconnus ne se trouveraient jamais et chacun minerait sa propre chaîne isolée ;
+# c'est ce qui fait UN seul réseau partagé. `--no-default-peers` les désactive
+# (réseau privé, développement local). Adresse hôte:port du bootnode.
+DEFAULT_SEEDS: tuple[str, ...] = ("51.170.139.244:5000",)
+
 
 def timestamped(text: str) -> None:
     print(f"[{time.strftime('%H:%M:%S')}] {text}", flush=True)
@@ -114,6 +121,20 @@ def resolve_miner_address(args: argparse.Namespace) -> str | None:
 def listen_host(args: argparse.Namespace) -> str:
     """Interface d'écoute : toutes (0.0.0.0) avec --public, sinon --host (127.0.0.1 par défaut)."""
     return "0.0.0.0" if getattr(args, "public", False) else args.host
+
+
+def seed_addresses(args: argparse.Namespace) -> list[str]:
+    """Amorces au démarrage : les pairs de --peers, PLUS les amorces publiques
+    par défaut (le bootnode), sauf si --no-default-peers. L'ordre est conservé
+    (les --peers d'abord) et les doublons sont écartés, pour qu'un simple
+    `python -m powchain node` rejoigne le réseau sans rien connaître à l'avance.
+    """
+    seeds = list(args.peers)
+    if not getattr(args, "no_default_peers", False):
+        for seed in DEFAULT_SEEDS:
+            if seed not in seeds:
+                seeds.append(seed)
+    return seeds
 
 
 async def run_node(args: argparse.Namespace) -> None:
@@ -151,7 +172,7 @@ async def run_node(args: argparse.Namespace) -> None:
     if miner_address:
         origin = f" (clé « {args.mine_label} » du wallet {args.wallet})" if args.mine_label else ""
         timestamped(f"minage vers {to_checksummed_address(miner_address)[:16]}...{origin}")
-    node.remember_addresses(args.peers, seed=True)  # amorces : rappelées d'abord, jamais oubliées
+    node.remember_addresses(seed_addresses(args), seed=True)  # --peers + amorces par défaut : rappelées d'abord, jamais oubliées
     await server.tick_now()  # premiers appels tout de suite ; ensuite le nœud entretient ses pairs seul
 
     stop = asyncio.Event()
@@ -473,7 +494,9 @@ def build_parser() -> argparse.ArgumentParser:
     listen.add_argument("--public", action="store_true",
                         help="écouter sur toutes les interfaces (0.0.0.0) : joignable depuis le réseau local ou Internet")
     node.add_argument("--port", type=int, default=5000)
-    node.add_argument("--peers", default="", help="adresses hôte:port séparées par des virgules")
+    node.add_argument("--peers", default="", help=f"adresses hôte:port séparées par des virgules ; s'ajoutent aux amorces par défaut ({', '.join(DEFAULT_SEEDS)})")
+    node.add_argument("--no-default-peers", action="store_true",
+                      help="ne pas se connecter aux amorces publiques par défaut (réseau isolé ou développement local)")
     mine = node.add_mutually_exclusive_group()
     mine.add_argument("--mine", type=mine_address_argument, default=None, metavar="ADRESSE",
                       help="miner vers cette adresse (hex brut ou forme à somme de contrôle)")
