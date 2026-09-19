@@ -236,9 +236,12 @@ const MIN_FEE_DEFAULT = 10000n; // 0.0001 FLS
 // ---------- format / parsing entier (jamais de flottant) ----------
 function fmtFLS(units){ const u = Number(units||0); return (u/1e8).toLocaleString('fr-FR',{maximumFractionDigits:8}); }
 function fmtTime(ts){ try{ return new Date(ts*1000).toLocaleString('fr-FR'); }catch(e){ return ts; } }
-function parseCoin(text){ // "1.5" -> BigInt unités ; lève sur entrée invalide
-  const t = (text||"").trim();
-  if(!/^\d+(\.\d+)?$/.test(t)) throw new Error("montant invalide (ex. 1.5)");
+function parseCoin(text){ // "1.5" ou "1,5" -> BigInt unités ; lève sur entrée invalide
+  // Le solde et les frais sont affichés (fmtFLS) au format fr-FR : virgule décimale, espace
+  // pour les milliers. On l'accepte aussi en entrée, sinon coller sa propre valeur affichée
+  // dans le champ (ex. le frais minimum pré-rempli) est rejeté par ce même parseur.
+  const t = (text||"").trim().replace(/[\s  ]/g,"").replace(",", ".");
+  if(!/^\d+(\.\d+)?$/.test(t)) throw new Error("montant invalide (ex. 1.5 ou 1,5)");
   const [whole, frac=""] = t.split(".");
   if(frac.length > 8) throw new Error("au plus 8 décimales");
   return BigInt(whole) * UNITS + BigInt((frac+"00000000").slice(0,8));
@@ -459,8 +462,9 @@ async function doSend(){
       if(!await hasValidChecksum(to)) throw new Error("somme de contrôle du destinataire invalide : recopiez l'adresse exacte");
     }
     to = to.toLowerCase();
-    const amount = parseCoin($('amount').value);
-    const fee = $('fee').value.trim() ? parseCoin($('fee').value) : 0n;
+    let amount, fee;
+    try{ amount = parseCoin($('amount').value); } catch(e){ throw new Error("montant : "+e.message); }
+    try{ fee = $('fee').value.trim() ? parseCoin($('fee').value) : 0n; } catch(e){ throw new Error("frais : "+e.message); }
     const data = $('data').value || "";
     if(amount===0n && data==="") throw new Error("transaction vide : indiquez un montant ou un message");
     if(TE.encode(data).length > 1024) throw new Error("message trop long (max 1024 octets)");
