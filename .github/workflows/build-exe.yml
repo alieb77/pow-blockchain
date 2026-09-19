@@ -53,6 +53,12 @@ jobs:
 
       - name: Attacher à la Release (sur un tag)
         if: startsWith(github.ref, 'refs/tags/')
-        run: gh release upload "${{ github.ref_name }}" dist/FLOUS.exe --clobber
+        run: |
+          # Créer la Release si elle n'existe pas encore (un tag seul n'en crée pas),
+          # puis y attacher l'exécutable.
+          gh release view "${{ github.ref_name }}" --repo "${{ github.repository }}" `
+            || gh release create "${{ github.ref_name }}" --repo "${{ github.repository }}" --title "FLOUS ${{ github.ref_name }}" --generate-notes
+          gh release upload "${{ github.ref_name }}" dist/FLOUS.exe --repo "${{ github.repository }}" --clobber
+        shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
